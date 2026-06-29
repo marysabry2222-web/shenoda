@@ -1,0 +1,1 @@
+print("Embedding model =", OLLAMA_EMBED_MODEL)
