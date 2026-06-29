@@ -22,19 +22,32 @@ _whisper = None
 def get_whisper():
     global _whisper
     if _whisper is None:
-        _whisper = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="float32")
+        _whisper = WhisperModel(
+    WHISPER_MODEL,
+    device="cpu",
+    compute_type="int8"
+)
     return _whisper
 print("✅ Whisper ready")
 
 
+import traceback
+
 async def _text_to_speech(text: str) -> bytes:
-    """Convert text to MP3 bytes using edge-tts."""
-    communicate = edge_tts.Communicate(text, TTS_VOICE)
-    audio_chunks = []
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio_chunks.append(chunk["data"])
-    return b"".join(audio_chunks)
+    try:
+        communicate = edge_tts.Communicate(text, TTS_VOICE)
+        audio_chunks = []
+
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_chunks.append(chunk["data"])
+
+        return b"".join(audio_chunks)
+
+    except Exception:
+        print("========== TTS ERROR ==========")
+        traceback.print_exc()
+        raise
 
 
 def _speech_to_text(audio_bytes: bytes) -> str:
@@ -71,15 +84,20 @@ class TTSRequest(BaseModel):
 
 @router.post("/tts")
 async def tts_endpoint(request: TTSRequest):
-    """Convert text to speech — called by frontend after chat response."""
     try:
         audio_data = await _text_to_speech(request.text)
+
         return StreamingResponse(
             io.BytesIO(audio_data),
-            media_type="audio/mpeg",
+            media_type="audio/mpeg"
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail="TTS Failed"
+        )
 @router.post("/voice")
 async def voice(audio: UploadFile = File(...)):
     """One-shot voice: STT → RAG → TTS → return audio."""
