@@ -64,7 +64,22 @@ async def chat(request: ChatRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+from pydantic import BaseModel
 
+class TTSRequest(BaseModel):
+    text: str
+
+@router.post("/tts")
+async def tts_endpoint(request: TTSRequest):
+    """Convert text to speech — called by frontend after chat response."""
+    try:
+        audio_data = await _text_to_speech(request.text)
+        return StreamingResponse(
+            io.BytesIO(audio_data),
+            media_type="audio/mpeg",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 @router.post("/voice")
 async def voice(audio: UploadFile = File(...)):
     """One-shot voice: STT → RAG → TTS → return audio."""
