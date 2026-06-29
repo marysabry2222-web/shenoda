@@ -1,4 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
+import { GiChurch } from 'react-icons/gi';
+import { FaPhone } from 'react-icons/fa';
 import { ChatWindow } from '../components/ChatWindow';
 import { ChatInput } from '../components/ChatInput';
 import { ErrorBanner } from '../components/ErrorBanner';
@@ -7,27 +9,26 @@ import { useChat } from '../hooks/useChat';
 import { useVoice } from '../hooks/useVoice';
 import { useCall } from '../hooks/useCall';
 
-/**
- * Main chat page.
- * Manages text chat, one-shot voice, and real-time call modes.
- */
 export function ChatPage() {
-  const { messages, isLoading, error, sendUserMessage, addAssistantMessage, clearError } =
-    useChat();
+  const {
+    messages,
+    isLoading,
+    isSpeaking,
+    error,
+    sendUserMessage,
+    addAssistantMessage,
+    clearError,
+  } = useChat();
 
   const [callOpen, setCallOpen] = useState(false);
 
-  // ── Callbacks shared between voice and call modes ───────────────────────
   const handleVoiceAnswer = useCallback(
     (text: string) => addAssistantMessage(text),
     [addAssistantMessage]
   );
 
   const handleCallTranscript = useCallback(
-    (text: string) => {
-      // Show what the user said as a user bubble
-      sendUserMessage(text);  // won't duplicate — we only add, not re-send to API
-    },
+    (text: string) => { sendUserMessage(text); },
     [sendUserMessage]
   );
 
@@ -36,17 +37,14 @@ export function ChatPage() {
     [addAssistantMessage]
   );
 
-  // ── One-shot voice ───────────────────────────────────────────────────────
   const { isRecording, isProcessing, startRecording, stopRecording, error: voiceError } =
     useVoice(handleVoiceAnswer);
 
-  // ── Real-time call ───────────────────────────────────────────────────────
   const call = useCall({
     onTranscript: handleCallTranscript,
     onAnswer: handleCallAnswer,
   });
 
-  // Start call as soon as modal opens
   useEffect(() => {
     if (callOpen && call.status === 'idle') {
       call.startCall();
@@ -63,7 +61,6 @@ export function ChatPage() {
 
   return (
     <div className="flex flex-col h-screen bg-parchment" dir="rtl">
-      {/* Subtle diagonal pattern */}
       <div
         className="fixed inset-0 pointer-events-none opacity-[0.03]"
         style={{
@@ -73,12 +70,10 @@ export function ChatPage() {
         }}
       />
 
-      {/* Navbar — pass call button */}
       <NavbarWithCall onCallClick={handleOpenCall} isCallActive={call.isCallActive} />
 
-      {/* Chat area */}
       <div className="flex flex-col flex-1 max-w-4xl mx-auto w-full pt-16 min-h-0">
-        <ChatWindow messages={messages} isLoading={isLoading} />
+        <ChatWindow messages={messages} isLoading={isLoading} isSpeaking={isSpeaking} />
 
         {combinedError && (
           <ErrorBanner message={combinedError} onDismiss={clearError} />
@@ -96,7 +91,6 @@ export function ChatPage() {
         />
       </div>
 
-      {/* Real-time call modal */}
       {callOpen && (
         <CallModal
           onClose={handleCloseCall}
@@ -107,10 +101,6 @@ export function ChatPage() {
     </div>
   );
 }
-
-// ── Inline sub-component: Navbar with call button ─────────────────────────
-import { GiChurch } from 'react-icons/gi';
-import { FaPhone } from 'react-icons/fa';
 
 function NavbarWithCall({
   onCallClick,
@@ -133,7 +123,6 @@ function NavbarWithCall({
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Real-time call button in navbar */}
           <button
             onClick={onCallClick}
             disabled={isCallActive}
@@ -150,7 +139,6 @@ function NavbarWithCall({
             <FaPhone className="text-xs" />
             {isCallActive ? 'مكالمة جارية' : 'اتصل بشنودة'}
           </button>
-
           <div className="text-gold-500/50 text-2xl select-none">✝</div>
         </div>
       </div>
