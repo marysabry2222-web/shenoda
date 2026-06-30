@@ -1,6 +1,48 @@
 import { useState, useRef, useCallback } from 'react';
 // import { sendVoice } from '../services/api';
 
+// =========================
+// Web Speech API type declarations
+// (not included in default TS DOM lib)
+// =========================
+interface SpeechRecognitionResultItem {
+  transcript: string;
+}
+
+interface SpeechRecognitionResult {
+  [index: number]: SpeechRecognitionResultItem;
+}
+
+interface SpeechRecognitionResultList {
+  [index: number]: SpeechRecognitionResult;
+}
+
+interface SpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList;
+}
+
+interface SpeechRecognition extends EventTarget {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  onstart: (() => void) | null;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  onerror: (() => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+}
+
+interface SpeechRecognitionConstructor {
+  new (): SpeechRecognition;
+}
+
+declare global {
+  interface Window {
+    SpeechRecognition?: SpeechRecognitionConstructor;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  }
+}
 
 interface UseVoiceReturn {
   isRecording: boolean;
@@ -18,26 +60,28 @@ export function useVoice(onAnswer: (text: string) => void): UseVoiceReturn {
 
   const startRecording = useCallback(() => {
     setError(null);
-    const SpeechRecognition =
-      window.SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-    if (!SpeechRecognition) {
+    const SpeechRecognitionImpl =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognitionImpl) {
       setError('المتصفح لا يدعم التعرف على الصوت');
       return;
     }
 
-    const recognition = new SpeechRecognition();
+    const recognition = new SpeechRecognitionImpl();
     recognition.lang = 'ar-EG';
     recognition.continuous = false;
     recognition.interimResults = false;
 
     recognition.onstart = () => setIsRecording(true);
 
-    recognition.onresult = async (event) => {
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
       const transcript = event.results[0][0].transcript;
       setIsProcessing(true);
-      await onAnswer(transcript); // sends to chat
-      setIsProcessing(false);
+      Promise.resolve(onAnswer(transcript)).finally(() => {
+        setIsProcessing(false);
+      });
     };
 
     recognition.onerror = () => {
