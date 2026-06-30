@@ -43,32 +43,56 @@ def get_whisper():
 
 
 # =========================
-# TTS
 # =========================
-from gtts import gTTS
-import io
+# TTS (Azure Speech)
+# =========================
+import azure.cognitiveservices.speech as speechsdk
+from config import TTS_VOICE, AZURE_SPEECH_KEY, AZURE_SPEECH_REGION
 
-# async def _text_to_speech(text: str) -> bytes:
-#     try:
-#         print(f"TTS Request: {text[:100]}")
+def _text_to_speech_sync(text: str) -> bytes:
+    try:
+        print(f"TTS Request: {text[:100]}")
 
-#         tts = gTTS(text=text, lang='ar', slow=False)
+        speech_config = speechsdk.SpeechConfig(
+            subscription=AZURE_SPEECH_KEY,
+            region=AZURE_SPEECH_REGION
+        )
+        speech_config.speech_synthesis_voice_name = TTS_VOICE
+        speech_config.set_speech_synthesis_output_format(
+            speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3
+        )
 
-#         audio_buffer = io.BytesIO()
-#         tts.write_to_fp(audio_buffer)
-#         audio_buffer.seek(0)
+        # No audio output device — we want bytes in memory
+        synthesizer = speechsdk.SpeechSynthesizer(
+            speech_config=speech_config,
+            audio_config=None
+        )
 
-#         audio_data = audio_buffer.read()
+        result = synthesizer.speak_text_async(text).get()
 
-#         print(f"✅ TTS Success ({len(audio_data)} bytes)")
+        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+            audio_data = result.audio_data
+            print(f"✅ TTS Success ({len(audio_data)} bytes)")
+            return audio_data
 
-#         return audio_data
+        elif result.reason == speechsdk.ResultReason.Canceled:
+            cancellation = result.cancellation_details
+            error_msg = f"TTS canceled: {cancellation.reason}"
+            if cancellation.reason == speechsdk.CancellationReason.Error:
+                error_msg += f" - {cancellation.error_details}"
+            raise RuntimeError(error_msg)
 
-#     except Exception as e:
-#         print("========== TTS ERROR ==========")
-#         traceback.print_exc()
-#         raise
+        else:
+            raise RuntimeError(f"Unexpected TTS result reason: {result.reason}")
 
+    except Exception:
+        print("========== TTS ERROR ==========")
+        traceback.print_exc()
+        raise
+
+
+async def _text_to_speech(text: str) -> bytes:
+    return await asyncio.to_thread(_text_to_speech_sync, text)
 # =========================
 # STT
 # =========================
