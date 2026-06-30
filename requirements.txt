@@ -16,5 +16,5 @@ torch==2.7.1
 edge-tts==6.1.12
 faster-whisper==1.1.1
 ctranslate2==4.6.0
-
+gTTS==2.5.4
 huggingface-hub
