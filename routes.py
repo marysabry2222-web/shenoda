@@ -45,24 +45,20 @@ def get_whisper():
 # =========================
 # TTS
 # =========================
+from gtts import gTTS
+import io
 
 async def _text_to_speech(text: str) -> bytes:
     try:
         print(f"TTS Request: {text[:100]}")
-        print(f"TTS Voice: {TTS_VOICE}")
 
-        communicate = edge_tts.Communicate(
-            text=text,
-            voice=TTS_VOICE
-        )
+        tts = gTTS(text=text, lang='ar', slow=False)
 
-        audio_chunks = []
+        audio_buffer = io.BytesIO()
+        tts.write_to_fp(audio_buffer)
+        audio_buffer.seek(0)
 
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_chunks.append(chunk["data"])
-
-        audio_data = b"".join(audio_chunks)
+        audio_data = audio_buffer.read()
 
         print(f"✅ TTS Success ({len(audio_data)} bytes)")
 
@@ -72,7 +68,6 @@ async def _text_to_speech(text: str) -> bytes:
         print("========== TTS ERROR ==========")
         traceback.print_exc()
         raise
-
 
 # =========================
 # STT
