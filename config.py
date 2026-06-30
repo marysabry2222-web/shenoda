@@ -7,8 +7,9 @@ TOP_K = 7
 
 MIN_SIMILARITY = 0.35
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-HF_TOKEN: str = os.getenv("HF_TOKEN", "")
-
+# HF_TOKEN: str = os.getenv("HF_TOKEN", "")
+AZURE_SPEECH_KEY: str = os.getenv("AZURE_SPEECH_KEY", "")
+AZURE_SPEECH_REGION: str = os.getenv("AZURE_SPEECH_REGION", "")
 GROQ_CHAT_MODEL: str = "llama-3.1-8b-instant"
 HF_EMBED_MODEL: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 HF_EMBED_URL: str = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_EMBED_MODEL}"
