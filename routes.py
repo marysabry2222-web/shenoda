@@ -48,26 +48,26 @@ def get_whisper():
 from gtts import gTTS
 import io
 
-async def _text_to_speech(text: str) -> bytes:
-    try:
-        print(f"TTS Request: {text[:100]}")
+# async def _text_to_speech(text: str) -> bytes:
+#     try:
+#         print(f"TTS Request: {text[:100]}")
 
-        tts = gTTS(text=text, lang='ar', slow=False)
+#         tts = gTTS(text=text, lang='ar', slow=False)
 
-        audio_buffer = io.BytesIO()
-        tts.write_to_fp(audio_buffer)
-        audio_buffer.seek(0)
+#         audio_buffer = io.BytesIO()
+#         tts.write_to_fp(audio_buffer)
+#         audio_buffer.seek(0)
 
-        audio_data = audio_buffer.read()
+#         audio_data = audio_buffer.read()
 
-        print(f"✅ TTS Success ({len(audio_data)} bytes)")
+#         print(f"✅ TTS Success ({len(audio_data)} bytes)")
 
-        return audio_data
+#         return audio_data
 
-    except Exception as e:
-        print("========== TTS ERROR ==========")
-        traceback.print_exc()
-        raise
+#     except Exception as e:
+#         print("========== TTS ERROR ==========")
+#         traceback.print_exc()
+#         raise
 
 # =========================
 # STT
