@@ -10,11 +10,10 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, WebSocket, WebSo
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-import edge_tts
 from faster_whisper import WhisperModel
 
 from models import ChatRequest, ChatResponse, HealthResponse
-from config import TTS_VOICE, WHISPER_MODEL
+from config import WHISPER_MODEL, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
 import rag
 
 router = APIRouter()
@@ -43,47 +42,41 @@ def get_whisper():
 
 
 # =========================
+# TTS (ElevenLabs)
 # =========================
-# TTS (Azure Speech)
-# =========================
-import azure.cognitiveservices.speech as speechsdk
-from config import TTS_VOICE, AZURE_SPEECH_KEY, AZURE_SPEECH_REGION
+from elevenlabs.client import ElevenLabs
+
+_elevenlabs_client = None
+
+def get_elevenlabs():
+    global _elevenlabs_client
+
+    if _elevenlabs_client is None:
+        print("Initializing ElevenLabs client...")
+        _elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+        print("✅ ElevenLabs client ready")
+
+    return _elevenlabs_client
+
 
 def _text_to_speech_sync(text: str) -> bytes:
     try:
         print(f"TTS Request: {text[:100]}")
 
-        speech_config = speechsdk.SpeechConfig(
-            subscription=AZURE_SPEECH_KEY,
-            region=AZURE_SPEECH_REGION
-        )
-        speech_config.speech_synthesis_voice_name = TTS_VOICE
-        speech_config.set_speech_synthesis_output_format(
-            speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3
-        )
+        client = get_elevenlabs()
 
-        # No audio output device — we want bytes in memory
-        synthesizer = speechsdk.SpeechSynthesizer(
-            speech_config=speech_config,
-            audio_config=None
+        audio_stream = client.text_to_speech.convert(
+            voice_id=ELEVENLABS_VOICE_ID,
+            text=text,
+            model_id="eleven_multilingual_v2",
+            output_format="mp3_44100_128",
         )
 
-        result = synthesizer.speak_text_async(text).get()
+        audio_data = b"".join(audio_stream)
 
-        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-            audio_data = result.audio_data
-            print(f"✅ TTS Success ({len(audio_data)} bytes)")
-            return audio_data
+        print(f"✅ TTS Success ({len(audio_data)} bytes)")
 
-        elif result.reason == speechsdk.ResultReason.Canceled:
-            cancellation = result.cancellation_details
-            error_msg = f"TTS canceled: {cancellation.reason}"
-            if cancellation.reason == speechsdk.CancellationReason.Error:
-                error_msg += f" - {cancellation.error_details}"
-            raise RuntimeError(error_msg)
-
-        else:
-            raise RuntimeError(f"Unexpected TTS result reason: {result.reason}")
+        return audio_data
 
     except Exception:
         print("========== TTS ERROR ==========")
@@ -93,6 +86,8 @@ def _text_to_speech_sync(text: str) -> bytes:
 
 async def _text_to_speech(text: str) -> bytes:
     return await asyncio.to_thread(_text_to_speech_sync, text)
+
+
 # =========================
 # STT
 # =========================
