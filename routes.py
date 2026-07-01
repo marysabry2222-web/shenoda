@@ -105,16 +105,27 @@ def _speech_to_text(audio_bytes: bytes) -> str:
     try:
         print("Starting transcription...")
 
-        segments, _ = whisper.transcribe(
-            tmp_path,
-            language="ar"
-        )
+        print("Before transcribe")
 
-        text = " ".join(
-            seg.text for seg in segments
-        ).strip()
+segments, info = whisper.transcribe(
+    tmp_path,
+    language="ar",
+    beam_size=1
+)
 
-        print("Transcript:", text)
+print("After transcribe")
+
+texts = []
+
+for segment in segments:
+    print("Segment:", segment.text)
+    texts.append(segment.text)
+
+text = " ".join(texts).strip()
+
+print("Transcript:", text)
+
+return text
 
         return text
 
