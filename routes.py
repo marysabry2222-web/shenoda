@@ -181,7 +181,7 @@ async def chat(request: ChatRequest):
     try:
         answer = await get_answer(request.message)
 
-         return ChatResponse(answer=answer)
+        return ChatResponse(answer=answer)
 
     except Exception:
         traceback.print_exc()
