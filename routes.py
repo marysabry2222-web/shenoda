@@ -267,8 +267,6 @@ async def tts_endpoint(request: TTSRequest):
 @router.post("/voice")
 async def voice(audio: UploadFile = File(...)):
     try:
-        print("Voice request received")
-
         audio_bytes = await audio.read()
 
         question = await asyncio.to_thread(
@@ -284,18 +282,13 @@ async def voice(audio: UploadFile = File(...)):
 
         answer_text = await get_answer(question)
 
-        # مؤقتًا بدون TTS
         return {
             "transcript": question,
             "answer": answer_text
         }
 
-    except HTTPException:
-        raise
-
     except Exception:
         traceback.print_exc()
-
         raise HTTPException(
             status_code=500,
             detail="Voice Failed"
