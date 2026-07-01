@@ -21,12 +21,12 @@ export function ChatPage() {
   } = useChat();
 
   const [callOpen, setCallOpen] = useState(false);
-
-  const handleVoiceAnswer = useCallback(
-    (text: string) => addAssistantMessage(text),
-    [addAssistantMessage]
-  );
-
+const handleVoiceAnswer = useCallback(
+  async (text: string) => {
+    await sendUserMessage(text);
+  },
+  [sendUserMessage]
+);
   const handleCallTranscript = useCallback(
     (text: string) => { sendUserMessage(text); },
     [sendUserMessage]
