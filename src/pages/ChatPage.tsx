@@ -21,8 +21,16 @@ export function ChatPage() {
   } = useChat();
 
   const [callOpen, setCallOpen] = useState(false);
+// const handleVoiceAnswer = useCallback(
+//   async (text: string) => {
+//     await sendUserMessage(text);
+//   },
+//   [sendUserMessage]
+// );
 const handleVoiceAnswer = useCallback(
   async (text: string) => {
+    console.log("VOICE TEXT =", text);
+    alert("VOICE: " + text);
     await sendUserMessage(text);
   },
   [sendUserMessage]
