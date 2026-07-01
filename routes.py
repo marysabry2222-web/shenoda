@@ -43,49 +43,49 @@ def get_whisper():
 
 # =========================
 # TTS (ElevenLabs)
-# =========================
-from elevenlabs.client import ElevenLabs
+# # =========================
+# from elevenlabs.client import ElevenLabs
 
-_elevenlabs_client = None
+# _elevenlabs_client = None
 
-def get_elevenlabs():
-    global _elevenlabs_client
+# def get_elevenlabs():
+#     global _elevenlabs_client
 
-    if _elevenlabs_client is None:
-        print("Initializing ElevenLabs client...")
-        _elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-        print("✅ ElevenLabs client ready")
+#     if _elevenlabs_client is None:
+#         print("Initializing ElevenLabs client...")
+#         _elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
+#         print("✅ ElevenLabs client ready")
 
-    return _elevenlabs_client
-
-
-def _text_to_speech_sync(text: str) -> bytes:
-    try:
-        print(f"TTS Request: {text[:100]}")
-
-        client = get_elevenlabs()
-
-        audio_stream = client.text_to_speech.convert(
-            voice_id=ELEVENLABS_VOICE_ID,
-            text=text,
-            model_id="eleven_multilingual_v2",
-            output_format="mp3_44100_128",
-        )
-
-        audio_data = b"".join(audio_stream)
-
-        print(f"✅ TTS Success ({len(audio_data)} bytes)")
-
-        return audio_data
-
-    except Exception:
-        print("========== TTS ERROR ==========")
-        traceback.print_exc()
-        raise
+#     return _elevenlabs_client
 
 
-async def _text_to_speech(text: str) -> bytes:
-    return await asyncio.to_thread(_text_to_speech_sync, text)
+# def _text_to_speech_sync(text: str) -> bytes:
+#     try:
+#         print(f"TTS Request: {text[:100]}")
+
+#         client = get_elevenlabs()
+
+#         audio_stream = client.text_to_speech.convert(
+#             voice_id=ELEVENLABS_VOICE_ID,
+#             text=text,
+#             model_id="eleven_multilingual_v2",
+#             output_format="mp3_44100_128",
+#         )
+
+#         audio_data = b"".join(audio_stream)
+
+#         print(f"✅ TTS Success ({len(audio_data)} bytes)")
+
+#         return audio_data
+
+#     except Exception:
+#         print("========== TTS ERROR ==========")
+#         traceback.print_exc()
+#         raise
+
+
+# async def _text_to_speech(text: str) -> bytes:
+#     return await asyncio.to_thread(_text_to_speech_sync, text)
 
 
 # =========================
