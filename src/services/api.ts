@@ -26,18 +26,18 @@ export async function textToSpeech(text: string): Promise<string | null> {
 
 export async function sendVoice(
   audioBlob: Blob
-): Promise<{ audioUrl: string; answerText: string }> {
+): Promise<{ transcript: string; answer: string }> {
   const formData = new FormData();
+
   formData.append('audio', audioBlob, 'audio.webm');
+
   const response = await api.post('/voice', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-    responseType: 'blob',
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
   });
-  const audioUrl = URL.createObjectURL(response.data as Blob);
-  const answerText = decodeURIComponent(
-    (response.headers['x-answer-text'] as string) || ''
-  );
-  return { audioUrl, answerText };
+
+  return response.data;
 }
 
 export async function checkHealth(): Promise<boolean> {
