@@ -15,7 +15,7 @@ HF_EMBED_MODEL: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-
 HF_EMBED_URL: str = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_EMBED_MODEL}"
 
 TTS_VOICE: str = "ar-EG-ShakirNeural"
-WHISPER_MODEL: str = "small"
+WHISPER_MODEL: str = "tiny"
 TOP_K: int = 5
 CHUNKS_PATH: str = "chunks.pkl"
 CORS_ORIGINS: list = ["*"]
