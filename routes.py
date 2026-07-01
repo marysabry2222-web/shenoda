@@ -134,7 +134,21 @@ def _speech_to_text(audio_bytes: bytes) -> str:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
+# =========================
+# RAG / LLM
+# =========================
 
+async def get_answer(question: str) -> str:
+    print("Question:", question)
+
+    answer = await asyncio.to_thread(
+        rag.answer_question,
+        question
+    )
+
+    print("Answer:", answer)
+
+    return answer
 # =========================
 # Models
 # =========================
@@ -165,12 +179,9 @@ async def chat(request: ChatRequest):
         )
 
     try:
-        answer = await asyncio.to_thread(
-            rag.answer_question,
-            request.message
-        )
+        answer = await get_answer(request.message)
 
-        return ChatResponse(answer=answer)
+         return ChatResponse(answer=answer)
 
     except Exception:
         traceback.print_exc()
@@ -208,6 +219,51 @@ async def tts_endpoint(request: TTSRequest):
 # Voice Endpoint
 # =========================
 
+# @router.post("/voice")
+# async def voice(audio: UploadFile = File(...)):
+#     try:
+#         print("Voice request received")
+
+#         audio_bytes = await audio.read()
+
+#         question = await asyncio.to_thread(
+#             _speech_to_text,
+#             audio_bytes
+#         )
+
+#         if not question:
+#             raise HTTPException(
+#                 status_code=400,
+#                 detail="Could not transcribe audio"
+#             )
+
+#         answer_text = await asyncio.to_thread(
+#             rag.answer_question,
+#             question
+#         )
+
+#         audio_data = await _text_to_speech(
+#             answer_text
+#         )
+
+#         return StreamingResponse(
+#             io.BytesIO(audio_data),
+#             media_type="audio/mpeg",
+#             headers={
+#                 "X-Answer-Text": answer_text[:500]
+#             }
+#         )
+
+#     except HTTPException:
+#         raise
+
+#     except Exception:
+#         traceback.print_exc()
+
+#         raise HTTPException(
+#             status_code=500,
+#             detail="Voice Failed"
+#         )
 @router.post("/voice")
 async def voice(audio: UploadFile = File(...)):
     try:
@@ -226,22 +282,13 @@ async def voice(audio: UploadFile = File(...)):
                 detail="Could not transcribe audio"
             )
 
-        answer_text = await asyncio.to_thread(
-            rag.answer_question,
-            question
-        )
+        answer_text = await get_answer(question)
 
-        audio_data = await _text_to_speech(
-            answer_text
-        )
-
-        return StreamingResponse(
-            io.BytesIO(audio_data),
-            media_type="audio/mpeg",
-            headers={
-                "X-Answer-Text": answer_text[:500]
-            }
-        )
+        # مؤقتًا بدون TTS
+        return {
+            "transcript": question,
+            "answer": answer_text
+        }
 
     except HTTPException:
         raise
