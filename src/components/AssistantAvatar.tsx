@@ -33,7 +33,7 @@ export function AssistantAvatar({
       src="/shenoda-robot.png"
       alt="شنودة"
       className={`${sizeClass} rounded-full object-cover w-full h-full`}
-      style={{ objectPosition: 'center 20%' }}
+      style={{ objectPosition: 'center 50%' }}
       onError={() => setImgError(true)}
     />
   ) : (
