@@ -8,19 +8,19 @@ import { useState, useRef, useCallback } from 'react';
 interface SpeechRecognitionResultItem {
   transcript: string;
 }
-
 interface SpeechRecognitionResult {
+  isFinal: boolean;
+  length: number;
   [index: number]: SpeechRecognitionResultItem;
 }
-
 interface SpeechRecognitionResultList {
+  length: number;
   [index: number]: SpeechRecognitionResult;
 }
-
 interface SpeechRecognitionEvent extends Event {
+  resultIndex: number;
   results: SpeechRecognitionResultList;
 }
-
 interface SpeechRecognition extends EventTarget {
   lang: string;
   continuous: boolean;
@@ -32,11 +32,9 @@ interface SpeechRecognition extends EventTarget {
   start: () => void;
   stop: () => void;
 }
-
 interface SpeechRecognitionConstructor {
   new (): SpeechRecognition;
 }
-
 declare global {
   interface Window {
     SpeechRecognition?: SpeechRecognitionConstructor;
@@ -56,10 +54,15 @@ export function useVoice(onAnswer: (text: string) => void): UseVoiceReturn {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const transcriptBufferRef = useRef<string>('');   // بيجمع كل النص لحد الإيقاف
+  const isStoppingRef = useRef<boolean>(false);       // لتفرقة الإيقاف اليدوي عن التوقف التلقائي
 
   const startRecording = useCallback(() => {
     setError(null);
+    transcriptBufferRef.current = '';
+    isStoppingRef.current = false;
 
     const SpeechRecognitionImpl =
       window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -71,17 +74,22 @@ export function useVoice(onAnswer: (text: string) => void): UseVoiceReturn {
 
     const recognition = new SpeechRecognitionImpl();
     recognition.lang = 'ar-EG';
-    recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.continuous = true;      // يفضل شغال لحد ما توقفيه
+    recognition.interimResults = true;  // عشان يفضل يبعت partial results ومايقفلش لوحده
 
     recognition.onstart = () => setIsRecording(true);
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
-      const transcript = event.results[0][0].transcript;
-      setIsProcessing(true);
-      Promise.resolve(onAnswer(transcript)).finally(() => {
-        setIsProcessing(false);
-      });
+      let finalChunk = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          finalChunk += result[0].transcript;
+        }
+      }
+      if (finalChunk) {
+        transcriptBufferRef.current += finalChunk + ' ';
+      }
     };
 
     recognition.onerror = () => {
@@ -89,15 +97,40 @@ export function useVoice(onAnswer: (text: string) => void): UseVoiceReturn {
       setIsRecording(false);
     };
 
-    recognition.onend = () => setIsRecording(false);
+    recognition.onend = () => {
+      setIsRecording(false);
+
+      // بعض المتصفحات بتوقف الـ recognition لوحدها بعد فترة سكوت طويلة
+      // فبنعيد تشغيلها تلقائي طالما المستخدم لسه مدوسش زرار الإيقاف
+      if (!isStoppingRef.current) {
+        try {
+          recognition.start();
+          return;
+        } catch {
+          // تجاهل، هيكمل تحت لو فشلت إعادة التشغيل
+        }
+      }
+
+      // هنا يبقى المستخدم دوس إيقاف فعلاً
+      const text = transcriptBufferRef.current.trim();
+      transcriptBufferRef.current = '';
+      isStoppingRef.current = false;
+
+      if (text) {
+        setIsProcessing(true);
+        Promise.resolve(onAnswer(text)).finally(() => {
+          setIsProcessing(false);
+        });
+      }
+    };
 
     recognitionRef.current = recognition;
     recognition.start();
   }, [onAnswer]);
 
   const stopRecording = useCallback(() => {
+    isStoppingRef.current = true;
     recognitionRef.current?.stop();
-    setIsRecording(false);
   }, []);
 
   return { isRecording, isProcessing, startRecording, stopRecording, error };
