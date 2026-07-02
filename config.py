@@ -6,8 +6,8 @@ EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 TOP_K = 7
 
 MIN_SIMILARITY = 0.35
-BLUESMINDS_API_KEY = os.getenv("BLUESMINDS_API_KEY")
-BLUESMINDS_CHAT_MODEL = os.getenv("BLUESMINDS_CHAT_MODEL", "gpt-4o-mini")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_CHAT_MODEL = "llama-3.3-70b-versatile"
 HF_TOKEN: str = os.getenv("HF_TOKEN", "")
 ELEVENLABS_API_KEY: str = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID: str = os.getenv("ELEVENLABS_VOICE_ID", "")
