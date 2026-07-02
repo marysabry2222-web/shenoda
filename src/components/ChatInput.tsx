@@ -15,7 +15,7 @@ interface ChatInputProps {
 
 /**
  * Message input area.
- * Contains: voice recording, real-time call button, text input, send button.
+ * Contains: send button, text input, voice recording, real-time call button.
  */
 export function ChatInput({
   onSend,
@@ -48,30 +48,18 @@ export function ChatInput({
   return (
     <div className="border-t border-church-200/60 bg-ivory/80 backdrop-blur-sm px-4 py-3">
       <div className="max-w-4xl mx-auto flex items-end gap-2">
-        {/* One-shot voice button */}
-        <VoiceButton
-          isRecording={isRecording}
-          isProcessing={isVoiceProcessing}
-          onStart={onVoiceStart}
-          onStop={onVoiceStop}
-          disabled={isLoading || isCallActive}
-        />
-
-        {/* Real-time call button */}
+        {/* Send button - يبان أقصى اليمين */}
         <button
-          onClick={onCallStart}
-          disabled={isCallActive || isBusy}
-          title="مكالمة مباشرة"
-          className={`
-            w-11 h-11 rounded-full flex items-center justify-center transition-all shadow
-            ${isCallActive
-              ? 'bg-green-500 text-white animate-pulse cursor-default'
-              : 'bg-church-700 hover:bg-church-600 text-gold-300 hover:text-gold-200'
-            }
-            disabled:opacity-50
-          `}
+          onClick={handleSend}
+          disabled={!text.trim() || isBusy || isCallActive}
+          title="إرسال"
+          className="
+            w-11 h-11 rounded-full bg-gold-500 hover:bg-gold-600
+            text-white flex items-center justify-center transition-colors
+            shadow disabled:opacity-40 disabled:cursor-not-allowed
+          "
         >
-          <FaPhone className="text-sm" />
+          <FaPaperPlane className="text-sm" />
         </button>
 
         {/* Text input */}
@@ -93,18 +81,30 @@ export function ChatInput({
           style={{ minHeight: '44px' }}
         />
 
-        {/* Send button */}
+        {/* One-shot voice button - يبان شمال */}
+        <VoiceButton
+          isRecording={isRecording}
+          isProcessing={isVoiceProcessing}
+          onStart={onVoiceStart}
+          onStop={onVoiceStop}
+          disabled={isLoading || isCallActive}
+        />
+
+        {/* Real-time call button - أقصى الشمال */}
         <button
-          onClick={handleSend}
-          disabled={!text.trim() || isBusy || isCallActive}
-          title="إرسال"
-          className="
-            w-11 h-11 rounded-full bg-gold-500 hover:bg-gold-600
-            text-white flex items-center justify-center transition-colors
-            shadow disabled:opacity-40 disabled:cursor-not-allowed
-          "
+          onClick={onCallStart}
+          disabled={isCallActive || isBusy}
+          title="مكالمة مباشرة"
+          className={`
+            w-11 h-11 rounded-full flex items-center justify-center transition-all shadow
+            ${isCallActive
+              ? 'bg-green-500 text-white animate-pulse cursor-default'
+              : 'bg-church-700 hover:bg-church-600 text-gold-300 hover:text-gold-200'
+            }
+            disabled:opacity-50
+          `}
         >
-          <FaPaperPlane className="text-sm" />
+          <FaPhone className="text-sm" />
         </button>
       </div>
 
