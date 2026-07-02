@@ -68,16 +68,15 @@ const handleVoiceAnswer = useCallback(
   const combinedError = error || voiceError;
 
   return (
-    <div className="flex flex-col h-screen bg-parchment" dir="rtl">
-      <div
-        className="fixed inset-0 pointer-events-none opacity-[0.03]"
-        style={{
-          backgroundImage: `repeating-linear-gradient(
-            45deg, #7a5c35 0px, #7a5c35 1px, transparent 1px, transparent 20px
-          )`,
-        }}
-      />
-
+    <div
+  className="fixed inset-0"
+  style={{
+    backgroundImage: "url('/church-bg.jpg')",
+    backgroundSize: 'cover',
+    backgroundPosition: 'center',
+    backgroundRepeat: 'no-repeat',
+  }}
+/>
       <NavbarWithCall onCallClick={handleOpenCall} isCallActive={call.isCallActive} />
 
       <div className="flex flex-col flex-1 max-w-4xl mx-auto w-full pt-16 min-h-0">
