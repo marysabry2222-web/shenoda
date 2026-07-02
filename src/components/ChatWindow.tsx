@@ -17,7 +17,6 @@ export function ChatWindow({ messages, isLoading, isSpeaking }: ChatWindowProps)
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
 
-  // Last assistant message index — only that one gets speaking animation
   const lastAssistantIdx = messages.reduce(
     (last, msg, idx) => (msg.role === 'assistant' ? idx : last),
     -1
@@ -25,18 +24,18 @@ export function ChatWindow({ messages, isLoading, isSpeaking }: ChatWindowProps)
 
   if (messages.length === 0 && !isLoading) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center gap-5 text-center py-12 px-4">
+      <div className="flex-1 overflow-y-auto flex flex-col items-center gap-4 text-center pt-8 pb-6 px-4">
         <AssistantAvatar size="lg" isSpeaking={isSpeaking} />
         <div>
-          <h2 className="text-church-800 text-3xl font-bold font-arabic mb-2">شنودة</h2>
-          <p className="text-church-500 font-arabic text-base leading-relaxed">
+          <h2 className="text-church-800 text-2xl font-bold font-arabic mb-1.5">شنودة</h2>
+          <p className="text-church-500 font-arabic text-sm leading-relaxed">
             المساعد الذكي لكنيسة الأنبا شنودة
           </p>
-          <p className="text-church-400 font-arabic text-sm mt-3">
+          <p className="text-church-400 font-arabic text-xs mt-2">
             اكتب سؤالك أدناه أو اضغط على الميكروفون للتحدث
           </p>
         </div>
-        <div className="flex items-center gap-3 text-gold-400/60 text-sm mt-2">
+        <div className="flex items-center gap-3 text-gold-400/60 text-sm">
           <span className="w-12 h-px bg-gold-300/50" />✝
           <span className="w-12 h-px bg-gold-300/50" />
         </div>
