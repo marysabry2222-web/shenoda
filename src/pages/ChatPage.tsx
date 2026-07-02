@@ -68,15 +68,17 @@ const handleVoiceAnswer = useCallback(
   const combinedError = error || voiceError;
 
   return (
-    <div
-  className="fixed inset-0"
-  style={{
-    backgroundImage: "url('/church-bg.jpg')",
-    backgroundSize: 'cover',
-    backgroundPosition: 'center',
-    backgroundRepeat: 'no-repeat',
-  }}
-/>
+    <div className="fixed inset-0">
+      <div
+        className="absolute inset-0 -z-10"
+        style={{
+          backgroundImage: "url('/church-bg.jpg')",
+          backgroundSize: 'cover',
+          backgroundPosition: 'center',
+          backgroundRepeat: 'no-repeat',
+        }}
+      />
+
       <NavbarWithCall onCallClick={handleOpenCall} isCallActive={call.isCallActive} />
 
       <div className="flex flex-col flex-1 max-w-4xl mx-auto w-full pt-16 min-h-0">
@@ -108,7 +110,6 @@ const handleVoiceAnswer = useCallback(
     </div>
   );
 }
-
 function NavbarWithCall({
   onCallClick,
   isCallActive,
