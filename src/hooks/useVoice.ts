@@ -88,7 +88,8 @@ export function useVoice(onAnswer: (text: string) => void): UseVoiceReturn {
         }
       }
       if (finalChunk) {
-        transcriptBufferRef.current += finalChunk + ' ';
+        // transcriptBufferRef.current += finalChunk + ' ';
+        transcriptBufferRef.current = finalChunk;
       }
     };
 
