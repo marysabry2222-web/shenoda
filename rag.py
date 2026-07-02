@@ -85,4 +85,4 @@ def answer_question(question: str) -> str:
     print("STATUS:", resp.status_code)
     print("BODY:", resp.text)
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()دا اصح بس هغير لجروق ؟
+    return resp.json()["choices"][0]["message"]["content"].strip()
