@@ -72,7 +72,7 @@ def answer_question(question: str) -> str:
             "Content-Type": "application/json",
         },
         json={
-            "model": BLUESMINDS_CHAT_MODEL,
+            "model": GROQ_CHAT_MODEL,
             "temperature": 0.2,
             "max_tokens": 800,
             "messages": [
