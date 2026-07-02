@@ -24,7 +24,7 @@ export function ChatWindow({ messages, isLoading, isSpeaking }: ChatWindowProps)
 
   if (messages.length === 0 && !isLoading) {
     return (
-      <div className="flex-1 overflow-y-auto flex flex-col items-center gap-4 text-center pt-8 pb-6 px-4">
+      <div className="flex-1 overflow-y-auto flex flex-col items-center justify-center gap-4 text-center py-8 px-4">
         <AssistantAvatar size="lg" isSpeaking={isSpeaking} />
         <div>
           <h2 className="text-church-800 text-2xl font-bold font-arabic mb-1.5">شنودة</h2>
