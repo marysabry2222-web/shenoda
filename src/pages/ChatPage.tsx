@@ -68,8 +68,8 @@ export function ChatPage() {
         className="absolute inset-0 -z-10 bg-white"
         style={{
           backgroundImage: "url('/church-bg.jpg')",
-          backgroundSize: '55% auto',
-          backgroundPosition: 'top center',
+          backgroundSize: 'cover',
+          backgroundPosition: 'center',
           backgroundRepeat: 'no-repeat',
         }}
       />
