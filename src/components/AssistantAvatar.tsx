@@ -28,20 +28,20 @@ export function AssistantAvatar({
     ? 'scale-105 ring-4 ring-red-400 ring-offset-2 ring-offset-transparent shadow-red-200 shadow-md'
     : 'scale-100 ring-2 ring-gold-500/40';
 
-  const content = !imgError ? (
-    <img
-      src="/avatar/avatar.png"
-      alt="شنودة"
-      className={`${sizeClass} rounded-full object-cover`}
-      onError={() => setImgError(true)}
-    />
-  ) : (
-    <div
-      className={`${sizeClass} rounded-full bg-gradient-to-br from-church-700 to-church-900 flex items-center justify-center`}
-    >
-      <GiChurch className="text-gold-400" />
-    </div>
-  );
+const content = !imgError ? (
+  <img
+  src="/shenoda-robot.png"
+  alt="شنودة"
+  className={`${sizeClass} rounded-full object-cover w-full h-full`}
+  onError={() => setImgError(true)}
+/>
+) : (
+  <div
+    className={`${sizeClass} rounded-full bg-gradient-to-br from-church-700 to-church-900 flex items-center justify-center`}
+  >
+    <GiChurch className="text-gold-400" />
+  </div>
+);
 
   return (
     <div
