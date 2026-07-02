@@ -61,12 +61,14 @@ def _retrieve_context(question: str) -> str:
     """Return all chunks as context — dataset is small enough (20 chunks)."""
     return "\n\n---\n\n".join(_chunks)
 
-
 def answer_question(question: str) -> str:
     context = _retrieve_context(question)
 
+    print("MODEL:", BLUESMINDS_CHAT_MODEL)
+    print("CONTEXT LENGTH:", len(context))
+
     resp = requests.post(
-    "https://api.bluesminds.com/v1/chat/completions",
+        "https://api.bluesminds.com/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {BLUESMINDS_API_KEY}",
             "Content-Type": "application/json",
@@ -77,12 +79,18 @@ def answer_question(question: str) -> str:
             "max_tokens": 800,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Church knowledge base:\n{context}\n\nQuestion: {question}\n\nAnswer in Arabic only."},
+                {
+                    "role": "user",
+                    "content": f"Church knowledge base:\n{context}\n\nQuestion: {question}\n\nAnswer in Arabic only."
+                },
             ],
         },
-        timeout=30,
+        timeout=60,
     )
+
     print("STATUS:", resp.status_code)
     print("BODY:", resp.text)
+
     resp.raise_for_status()
+
     return resp.json()["choices"][0]["message"]["content"].strip()
