@@ -63,12 +63,13 @@ export function ChatPage() {
 
   return (
     <div className="fixed inset-0">
+      {/* الخلفية - أيقونة القديس، محافظ على نسبتها من غير قص */}
       <div
-        className="absolute inset-0 -z-10"
+        className="absolute inset-0 -z-10 bg-white"
         style={{
           backgroundImage: "url('/church-bg.jpg')",
-          backgroundSize: 'cover',
-          backgroundPosition: 'center',
+          backgroundSize: '55% auto',
+          backgroundPosition: 'top center',
           backgroundRepeat: 'no-repeat',
         }}
       />
