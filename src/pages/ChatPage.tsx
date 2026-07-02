@@ -62,7 +62,7 @@ export function ChatPage() {
   const combinedError = error || voiceError;
 
   return (
-    <div className="fixed inset-0">
+    <div className="fixed inset-0 flex flex-col overflow-hidden">
       {/* الخلفية - أيقونة القديس، محافظ على نسبتها من غير قص */}
       <div
         className="absolute inset-0 -z-10 bg-white"
@@ -76,7 +76,7 @@ export function ChatPage() {
 
       <NavbarWithCall onCallClick={handleOpenCall} isCallActive={call.isCallActive} />
 
-      <div className="flex flex-col flex-1 max-w-4xl mx-auto w-full pt-16 min-h-0">
+      <div className="flex flex-col flex-1 max-w-4xl mx-auto w-full pt-16 min-h-0 overflow-hidden">
         <ChatWindow messages={messages} isLoading={isLoading} isSpeaking={isSpeaking} />
 
         {combinedError && (
