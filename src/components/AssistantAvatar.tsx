@@ -8,9 +8,9 @@ interface AssistantAvatarProps {
 }
 
 const sizeClasses = {
-  sm: 'w-8 h-8 text-base',
-  md: 'w-12 h-12 text-2xl',
-  lg: 'w-24 h-24 text-5xl',
+  sm: 'w-6 h-6 text-sm',
+  md: 'w-9 h-9 text-xl',
+  lg: 'w-16 h-16 text-3xl',
 };
 
 export function AssistantAvatar({
@@ -28,30 +28,31 @@ export function AssistantAvatar({
     ? 'scale-105 ring-4 ring-red-400 ring-offset-2 ring-offset-transparent shadow-red-200 shadow-md'
     : 'scale-100 ring-2 ring-gold-500/40';
 
-const content = !imgError ? (
-  <img
-  src="/shenoda-robot.png"
-  alt="شنودة"
-  className={`${sizeClass} rounded-full object-cover w-full h-full`}
-  onError={() => setImgError(true)}
-/>
-) : (
-  <div
-    className={`${sizeClass} rounded-full bg-gradient-to-br from-church-700 to-church-900 flex items-center justify-center`}
-  >
-    <GiChurch className="text-gold-400" />
-  </div>
-);
+  const content = !imgError ? (
+    <img
+      src="/shenoda-robot.png"
+      alt="شنودة"
+      className={`${sizeClass} rounded-full object-cover w-full h-full`}
+      style={{ objectPosition: 'center 20%' }}
+      onError={() => setImgError(true)}
+    />
+  ) : (
+    <div
+      className={`${sizeClass} rounded-full bg-gradient-to-br from-church-700 to-church-900 flex items-center justify-center`}
+    >
+      <GiChurch className="text-gold-400" />
+    </div>
+  );
 
   return (
     <div
       className={`
+        ${sizeClass}
         rounded-full transition-all duration-300 shadow
         ${animationClass}
       `}
     >
       {content}
-
       {/* Speaking equalizer bars — only on lg size */}
       {isSpeaking && size === 'lg' && (
         <div className="flex items-end justify-center gap-1 mt-2">
