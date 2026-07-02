@@ -68,7 +68,7 @@ def answer_question(question: str) -> str:
     print("CONTEXT LENGTH:", len(context))
 
     resp = requests.post(
-        "https://api.bluesminds.com/v1/chat/completions",
+        "https://api.bluesminds.com/v1",
         headers={
             "Authorization": f"Bearer {BLUESMINDS_API_KEY}",
             "Content-Type": "application/json",
