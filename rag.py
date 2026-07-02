@@ -5,8 +5,8 @@ import requests
 
 from config import (
     CHUNKS_PATH,
-    BLUESMINDS_API_KEY,
-    BLUESMINDS_CHAT_MODEL,
+    GROQ_API_KEY,
+    GROQ_CHAT_MODEL,
     TOP_K,
 )
 
@@ -60,41 +60,27 @@ def _embed_question(question: str) -> np.ndarray:
 def _retrieve_context(question: str) -> str:
     """Return all chunks as context — dataset is small enough (20 chunks)."""
     return "\n\n---\n\n".join(_chunks)
+
+
 def answer_question(question: str) -> str:
-    try:
-        context = _retrieve_context(question)
+    context = _retrieve_context(question)
 
-        print("MODEL:", BLUESMINDS_CHAT_MODEL)
-        print("CONTEXT LENGTH:", len(context))
-
-        resp = requests.post(
-            "https://api.bluesminds.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {BLUESMINDS_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": BLUESMINDS_CHAT_MODEL,
-                "temperature": 0.2,
-                "max_tokens": 800,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": f"Church knowledge base:\n{context}\n\nQuestion: {question}\n\nAnswer in Arabic only."
-                    },
-                ],
-            },
-            timeout=60,
-        )
-
-        print("STATUS:", resp.status_code)
-        print("BODY:", resp.text)
-
-        resp.raise_for_status()
-
-        return resp.json()["choices"][0]["message"]["content"].strip()
-
-    except Exception as e:
-        print("FULL ERROR:", repr(e))
-        raise
+    resp = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": GROQ_CHAT_MODEL,
+            "temperature": 0.2,
+            "max_tokens": 800,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Church knowledge base:\n{context}\n\nQuestion: {question}\n\nAnswer in Arabic only."},
+            ],
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
