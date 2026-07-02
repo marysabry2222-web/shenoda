@@ -1,4 +1,4 @@
-import pickle
+كدا import pickle
 import numpy as np
 import faiss
 import requests
@@ -66,13 +66,13 @@ def answer_question(question: str) -> str:
     context = _retrieve_context(question)
 
     resp = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
+    "https://api.groq.com/openai/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json",
         },
         json={
-            "model": GROQ_CHAT_MODEL,
+            "model": BLUESMINDS_CHAT_MODEL,
             "temperature": 0.2,
             "max_tokens": 800,
             "messages": [
@@ -80,7 +80,9 @@ def answer_question(question: str) -> str:
                 {"role": "user", "content": f"Church knowledge base:\n{context}\n\nQuestion: {question}\n\nAnswer in Arabic only."},
             ],
         },
-        timeout=30,
+        timeout=60,
     )
+    print("STATUS:", resp.status_code)
+    print("BODY:", resp.text)
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    return resp.json()["choices"][0]["message"]["content"].strip()دا اصح بس هغير لجروق ؟
