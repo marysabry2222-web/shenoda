@@ -64,13 +64,14 @@ export function ChatPage() {
   return (
     <div className="fixed inset-0 flex flex-col overflow-hidden">
      {/* الخلفية - أيقونة القديس */}
-<div className="absolute inset-0 -z-10">
+{/* الخلفية - أيقونة القديس */}
+<div className="absolute inset-0 -z-10 bg-white">
   <img
     src="/church-bg.jpg"
     alt=""
-    className="w-full h-full object-cover"
+    className="w-full h-full object-contain object-top"
   />
-  <div className="absolute inset-0 bg-white/70" />
+  <div className="absolute inset-0 bg-white/60" />
 </div>
 
       <NavbarWithCall onCallClick={handleOpenCall} isCallActive={call.isCallActive} />
