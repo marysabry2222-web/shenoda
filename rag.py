@@ -87,10 +87,13 @@ def answer_question(question: str) -> str:
         },
         timeout=60,
     )
-
     print("STATUS:", resp.status_code)
     print("BODY:", resp.text)
 
     resp.raise_for_status()
 
     return resp.json()["choices"][0]["message"]["content"].strip()
+
+except Exception as e:
+    print("FULL ERROR:", repr(e))
+    raise
