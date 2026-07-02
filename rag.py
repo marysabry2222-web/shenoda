@@ -82,5 +82,7 @@ def answer_question(question: str) -> str:
         },
         timeout=30,
     )
+    print("STATUS:", resp.status_code)
+    print("BODY:", resp.text)
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"].strip()
