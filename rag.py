@@ -1,4 +1,4 @@
-كدا import pickle
+import pickle
 import numpy as np
 import faiss
 import requests
@@ -86,3 +86,12 @@ def answer_question(question: str) -> str:
     print("BODY:", resp.text)
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"].strip()
+
+
+
+
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+except Exception as e:
+    print("FULL ERROR:", repr(e))
+    raise
