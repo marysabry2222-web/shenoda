@@ -5,8 +5,8 @@ import requests
 
 from config import (
     CHUNKS_PATH,
-    GROQ_API_KEY,
-    GROQ_CHAT_MODEL,
+    BLUESMINDS_API_KEY,
+    BLUESMINDS_CHAT_MODEL,
     TOP_K,
 )
 
@@ -66,13 +66,13 @@ def answer_question(question: str) -> str:
     context = _retrieve_context(question)
 
     resp = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
+    "https://api.bluesminds.com/v1/chat/completions",
         headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Authorization": f"Bearer {BLUESMINDS_API_KEY}",
             "Content-Type": "application/json",
         },
         json={
-            "model": GROQ_CHAT_MODEL,
+            "model": BLUESMINDS_CHAT_MODEL,
             "temperature": 0.2,
             "max_tokens": 800,
             "messages": [
