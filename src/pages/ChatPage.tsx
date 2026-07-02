@@ -64,12 +64,12 @@ export function ChatPage() {
   return (
     <div className="fixed inset-0 flex flex-col overflow-hidden">
      {/* الخلفية - أيقونة القديس */}
-{/* الخلفية - أيقونة القديس */}
+
 <div className="absolute inset-0 -z-10 bg-white">
   <img
     src="/church-bg.jpg"
     alt=""
-    className="w-full h-full object-contain object-top"
+    className="w-full h-full object-cover object-top md:object-contain"
   />
   <div className="absolute inset-0 bg-white/60" />
 </div>
