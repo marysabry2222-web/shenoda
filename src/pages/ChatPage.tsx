@@ -63,15 +63,19 @@ export function ChatPage() {
 
   return (
     <div className="fixed inset-0 flex flex-col overflow-hidden">
-     {/* الخلفية - أيقونة القديس */}
-
-<div className="absolute inset-0 -z-10 bg-white">
+    {/* الخلفية - صورة الكنيسة، بتكبر وتصغر بسلاسة مع الشاشة */}
+<div className="absolute inset-0 -z-10 bg-[#fdfaf3] overflow-hidden">
   <img
     src="/church-bg.jpg"
     alt=""
-    className="w-full h-full object-cover object-top md:object-contain"
+    className="absolute inset-0 m-auto opacity-25"
+    style={{
+      width: 'min(90vw, 90vh)',   // بتاخد أصغر قيمة بين عرض وارتفاع الشاشة
+      height: 'auto',
+      objectFit: 'contain',
+    }}
   />
-  <div className="absolute inset-0 bg-white/60" />
+  <div className="absolute inset-0 bg-white/70" />
 </div>
 
       <NavbarWithCall onCallClick={handleOpenCall} isCallActive={call.isCallActive} />
