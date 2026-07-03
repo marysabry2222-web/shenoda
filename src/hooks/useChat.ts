@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react';
-import type { Message } from '../types';
+import { useState, useCallback, useRef } from 'react';
+import type { Message, HistoryItem } from '../types';
 import { sendMessage } from '../services/api';
 
 interface UseChatReturn {
@@ -12,6 +12,10 @@ interface UseChatReturn {
   addAssistantMessage: (text: string) => void;
   clearError: () => void;
 }
+
+// أقصى عدد رسائل (سؤال+رد) نبعتها كـ history مع كل طلب جديد
+// عشان مانضخمش الـ payload ومانستهلكش توكنز زيادة عن اللزوم
+const MAX_HISTORY_MESSAGES = 10;
 
 /**
  * Manages the chat conversation state.
@@ -29,6 +33,11 @@ export function useChat(): UseChatReturn {
   const [error, setError] = useState<string | null>(null);
   const isSpeaking = false;
 
+  // نسخة مرآة (mirror) من messages بتتحدث فورًا (sync)، عشان send() يقدر
+  // يبني الـ history من آخر حالة فعلية من غير ما يحتاج messages في dependency array
+  // بتاعته (وده كان هيسبب إعادة إنشاء send() مع كل رسالة جديدة).
+  const messagesRef = useRef<Message[]>([]);
+
   const createMessage = (role: Message['role'], content: string): Message => ({
     id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     role,
@@ -36,9 +45,20 @@ export function useChat(): UseChatReturn {
     timestamp: new Date(),
   });
 
-  const addAssistantMessage = useCallback((text: string) => {
-    setMessages((prev) => [...prev, createMessage('assistant', text)]);
+  const appendMessage = useCallback((message: Message) => {
+    setMessages((prev) => {
+      const next = [...prev, message];
+      messagesRef.current = next;
+      return next;
+    });
   }, []);
+
+  const addAssistantMessage = useCallback(
+    (text: string) => {
+      appendMessage(createMessage('assistant', text));
+    },
+    [appendMessage]
+  );
 
   const handleError = (err: unknown) => {
     const isNetworkError =
@@ -51,23 +71,35 @@ export function useChat(): UseChatReturn {
     );
   };
 
+  const buildHistory = (): HistoryItem[] =>
+    messagesRef.current.slice(-MAX_HISTORY_MESSAGES).map(({ role, content }) => ({
+      role,
+      content,
+    }));
+
   const send = useCallback(async (text: string) => {
     if (!text.trim() || isLoading) return;
-    setMessages((prev) => [...prev, createMessage('user', text)]);
+
+    // بنبني الـ history من الرسايل اللي موجودة *قبل* ما نضيف رسالة المستخدم
+    // الحالية، عشان السؤال الحالي يتبعت لوحده في حقل message مش مكرر جوه history
+    const history = buildHistory();
+
+    appendMessage(createMessage('user', text));
     setIsLoading(true);
     setError(null);
     try {
-      const answer = await sendMessage(text);
-      setMessages((prev) => [...prev, createMessage('assistant', answer)]);
+      const answer = await sendMessage(text, history);
+      appendMessage(createMessage('assistant', answer));
     } catch (err: unknown) {
       handleError(err);
     } finally {
       setIsLoading(false);
     }
-  }, [isLoading]);
+  }, [isLoading, appendMessage]);
 
   const sendUserMessage = useCallback((text: string) => send(text), [send]);
   const sendVoiceMessage = useCallback((text: string) => send(text), [send]);
+
   const clearError = useCallback(() => setError(null), []);
 
   return {
