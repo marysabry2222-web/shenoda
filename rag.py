@@ -27,11 +27,13 @@ STRICT RULES:
 - Be warm, respectful, and natural.
 """
 
-# رسالة بديلة تتقال للمستخدم لو كل محاولات الاتصال بـ Groq فشلت
 FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، ممكن تجرب تاني بعد شوية؟"
 
 MAX_RETRIES = 3
-NETWORK_ERROR_BASE_DELAY = 2  # ثواني، بيتضاعف مع كل محاولة (2, 4, 8)
+NETWORK_ERROR_BASE_DELAY = 2
+
+# أقصى عدد رسائل سابقة (من المستخدم + المساعد) هنبعتها كـ context للموديل
+MAX_HISTORY_MESSAGES = 10
 
 
 def load_resources():
@@ -49,19 +51,6 @@ def load_resources():
     print(f"✅ Ready — {len(_chunks)} chunks")
 
 
-def _embed_question(question: str) -> np.ndarray:
-    """
-    Embed question using the same stored embeddings via cosine similarity.
-    No sentence-transformers needed — we find the closest chunk by
-    keyword overlap as fallback, or use Groq to pick context directly.
-
-    Since we can't re-embed without sentence-transformers,
-    we send ALL chunks as context (only 20 chunks = small enough).
-    """
-    # Return None to signal: use full context
-    return None
-
-
 def _retrieve_context(question: str) -> str:
     """Return all chunks as context — dataset is small enough (20 chunks)."""
     return "\n\n---\n\n".join(_chunks)
@@ -73,13 +62,39 @@ def _extract_retry_seconds(response: requests.Response, default: float = 5.0) ->
         message = response.json().get("error", {}).get("message", "")
         match = re.search(r"try again in ([\d.]+)s", message)
         if match:
-            return float(match.group(1)) + 0.5  # هامش أمان بسيط
+            return float(match.group(1)) + 0.5
     except Exception:
         pass
     return default
 
 
-def _call_groq(question: str, context: str) -> requests.Response:
+def _build_messages(question: str, context: str, history: list[dict] | None) -> list[dict]:
+    """
+    بيبني الـ messages array اللي هتتبعت لـ Groq:
+    system prompt → آخر رسائل من المحادثة (لو موجودة) → السؤال الحالي مع الـ context
+    """
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    if history:
+        # ناخد بس آخر MAX_HISTORY_MESSAGES رسالة عشان منبعتش سياق كبير أوي
+        recent_history = history[-MAX_HISTORY_MESSAGES:]
+        for item in recent_history:
+            role = item.get("role")
+            content = item.get("content")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+
+    messages.append(
+        {
+            "role": "user",
+            "content": f"Church knowledge base:\n{context}\n\nQuestion: {question}\n\nAnswer in Arabic only.",
+        }
+    )
+
+    return messages
+
+
+def _call_groq(messages: list[dict]) -> requests.Response:
     return requests.post(
         "https://api.groq.com/openai/v1/chat/completions",
         headers={
@@ -90,35 +105,28 @@ def _call_groq(question: str, context: str) -> requests.Response:
             "model": GROQ_CHAT_MODEL,
             "temperature": 0.2,
             "max_tokens": 800,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": f"Church knowledge base:\n{context}\n\nQuestion: {question}\n\nAnswer in Arabic only.",
-                },
-            ],
+            "messages": messages,
         },
         timeout=60,
     )
 
 
-def answer_question(question: str) -> str:
+def answer_question(question: str, history: list[dict] | None = None) -> str:
     context = _retrieve_context(question)
+    messages = _build_messages(question, context, history)
 
     for attempt in range(MAX_RETRIES + 1):
         is_last_attempt = attempt == MAX_RETRIES
 
         try:
-            resp = _call_groq(question, context)
+            resp = _call_groq(messages)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-            # ECONNRESET / Network Error / timeout بيقعوا هنا
             print(f"NETWORK ERROR (attempt {attempt + 1}/{MAX_RETRIES + 1}): {exc}")
             if is_last_attempt:
                 return FALLBACK_MESSAGE
-            time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))  # 2s, 4s, 8s
+            time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
             continue
         except requests.exceptions.RequestException as exc:
-            # أي مشكلة شبكة تانية غير متوقعة (DNS، SSL، إلخ)
             print(f"UNEXPECTED REQUEST ERROR (attempt {attempt + 1}/{MAX_RETRIES + 1}): {exc}")
             if is_last_attempt:
                 return FALLBACK_MESSAGE
@@ -137,13 +145,11 @@ def answer_question(question: str) -> str:
             continue
 
         if resp.status_code >= 500:
-            # مشكلة مؤقتة من طرف Groq نفسه
             if is_last_attempt:
                 return FALLBACK_MESSAGE
             time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
             continue
 
-        # أي خطأ تاني (400/401/...) مش مستاهل إعادة محاولة - خطأ حقيقي في الطلب
         resp.raise_for_status()
 
         return resp.json()["choices"][0]["message"]["content"].strip()
