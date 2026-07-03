@@ -64,7 +64,7 @@ export function ChatPage() {
   return (
     <div className="fixed inset-0 flex flex-col overflow-hidden">
 {/* الخلفية - صورة الكنيسة، خافتة كديكور، بتتلائم تلقائي مع أي شاشة */}
-<div className="absolute inset-0 -z-10 bg-[#fdfaf3] overflow-hidden">
+<div className="absolute inset-0 -z-10 bg-[#fdfaf3]">
   <img
     src="/church-bg.jpg"
     alt=""
