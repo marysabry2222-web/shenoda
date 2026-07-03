@@ -64,13 +64,13 @@ export function ChatPage() {
   return (
     <div className="fixed inset-0 flex flex-col overflow-hidden">
 {/* الخلفية - صورة الكنيسة، خافتة كديكور، بتتلائم تلقائي مع أي شاشة */}
-<div className="absolute inset-0 -z-10 bg-[#fdfaf3]">
+<div className="absolute inset-0 -z-10 bg-white">
   <img
     src="/church-bg.jpg"
     alt=""
-    className="w-full h-full object-cover object-center opacity-25"
+    className="w-full h-full object-cover opacity-60 object-[30%_center] md:object-center"
   />
-  <div className="absolute inset-0 bg-white/70" />
+  <div className="absolute inset-0 bg-white/60" />
 </div>
 
       <NavbarWithCall onCallClick={handleOpenCall} isCallActive={call.isCallActive} />
