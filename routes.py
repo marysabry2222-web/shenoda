@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from faster_whisper import WhisperModel
 
-from models import ChatRequest, ChatResponse, HealthResponse
+from models import ChatRequest, ChatResponse, HealthResponse, HistoryItem
 from config import WHISPER_MODEL, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
 import rag
 
@@ -138,12 +138,17 @@ def _speech_to_text(audio_bytes: bytes) -> str:
 # RAG / LLM
 # =========================
 
-async def get_answer(question: str) -> str:
+async def get_answer(question: str, history: list[HistoryItem] | None = None) -> str:
     print("Question:", question)
+
+    # بنحول الـ Pydantic models لـ plain dicts (role/content) عشان rag.py
+    # يستخدمها مباشرة كـ messages جاهزة لـ Groq من غير ما يعتمد على pydantic
+    history_dicts = [item.model_dump() for item in history] if history else []
 
     answer = await asyncio.to_thread(
         rag.answer_question,
-        question
+        question,
+        history_dicts
     )
 
     print("Answer:", answer)
@@ -179,7 +184,7 @@ async def chat(request: ChatRequest):
         )
 
     try:
-        answer = await get_answer(request.message)
+        answer = await get_answer(request.message, request.history)
 
         return ChatResponse(answer=answer)
 
@@ -280,6 +285,9 @@ async def voice(audio: UploadFile = File(...)):
                 detail="Could not transcribe audio"
             )
 
+        # ملحوظة: /voice لسه مبيستقبلش history من الفرونت إند حاليًا
+        # (sendVoice في api.ts لسه بيبعت الصوت بس). ممكن نضيفها لاحقًا
+        # لو حابين محادثات الصوت تبقى فيها سياق زي الشات النصي.
         answer_text = await get_answer(question)
 
         return {
