@@ -1,303 +1,157 @@
-import io
-import json
-import base64
-import asyncio
-import tempfile
-import os
-import traceback
+import pickle
+import re
+import time
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+import numpy as np
+import faiss
+import requests
+from config import (
+    CHUNKS_PATH,
+    GROQ_API_KEY,
+    GROQ_CHAT_MODEL,
+    TOP_K,
+)
 
-from faster_whisper import WhisperModel
+_chunks: list[str] = []
+_index: faiss.Index | None = None
+_embeddings: np.ndarray | None = None
 
-from models import ChatRequest, ChatResponse, HealthResponse, HistoryItem
-from config import WHISPER_MODEL, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
-import rag
+SYSTEM_PROMPT = """You are an AI assistant named شنودة for Anba Shenouda Church in Alexandria, Egypt.
+STRICT RULES:
+- Your name is شنودة. If asked who you are, say: "أنا شنودة، مساعد ذكي خاص بكنيسة الأنبا شنودة."
+- Answer ONLY in Arabic.
+- Answer ONLY using the provided context. Never invent information.
+- If the answer is not in the context, say exactly: "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا."
+- Never say you are a priest or bishop.
+- Never mention FAISS, embeddings, chunks, or retrieval.
+- Be warm, respectful, and natural.
+"""
 
-router = APIRouter()
+FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، ممكن تجرب تاني بعد شوية؟"
 
-# =========================
-# Whisper
-# =========================
+MAX_RETRIES = 3
+NETWORK_ERROR_BASE_DELAY = 2
 
-_whisper = None
-
-def get_whisper():
-    global _whisper
-
-    if _whisper is None:
-        print(f"Loading Whisper model ({WHISPER_MODEL})...")
-
-        _whisper = WhisperModel(
-            WHISPER_MODEL,
-            device="cpu",
-            compute_type="int8"
-        )
-
-        print("✅ Whisper loaded successfully")
-
-    return _whisper
+# أقصى عدد رسائل سابقة (من المستخدم + المساعد) هنبعتها كـ context للموديل
+MAX_HISTORY_MESSAGES = 10
 
 
-# =========================
-# TTS (ElevenLabs)
-# # =========================
-# from elevenlabs.client import ElevenLabs
+def load_resources():
+    global _chunks, _index, _embeddings
+    print("Loading chunks...")
+    with open(CHUNKS_PATH, "rb") as f:
+        _chunks = pickle.load(f)
+    _chunks = [c["text"] if isinstance(c, dict) else c for c in _chunks]
 
-# _elevenlabs_client = None
-
-# def get_elevenlabs():
-#     global _elevenlabs_client
-
-#     if _elevenlabs_client is None:
-#         print("Initializing ElevenLabs client...")
-#         _elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-#         print("✅ ElevenLabs client ready")
-
-#     return _elevenlabs_client
+    print("Loading embeddings from disk...")
+    _embeddings = np.load("embeddings.npy").astype(np.float32)
+    faiss.normalize_L2(_embeddings)
+    _index = faiss.IndexFlatIP(_embeddings.shape[1])
+    _index.add(_embeddings)
+    print(f"✅ Ready — {len(_chunks)} chunks")
 
 
-# def _text_to_speech_sync(text: str) -> bytes:
-#     try:
-#         print(f"TTS Request: {text[:100]}")
-
-#         client = get_elevenlabs()
-
-#         audio_stream = client.text_to_speech.convert(
-#             voice_id=ELEVENLABS_VOICE_ID,
-#             text=text,
-#             model_id="eleven_multilingual_v2",
-#             output_format="mp3_44100_128",
-#         )
-
-#         audio_data = b"".join(audio_stream)
-
-#         print(f"✅ TTS Success ({len(audio_data)} bytes)")
-
-#         return audio_data
-
-#     except Exception:
-#         print("========== TTS ERROR ==========")
-#         traceback.print_exc()
-#         raise
+def _retrieve_context(question: str) -> str:
+    """Return all chunks as context — dataset is small enough (20 chunks)."""
+    return "\n\n---\n\n".join(_chunks)
 
 
-# async def _text_to_speech(text: str) -> bytes:
-#     return await asyncio.to_thread(_text_to_speech_sync, text)
-
-
-# =========================
-# STT
-# =========================
-def _speech_to_text(audio_bytes: bytes) -> str:
-    whisper = get_whisper()
-
-    with tempfile.NamedTemporaryFile(
-        suffix=".webm",
-        delete=False
-    ) as f:
-        f.write(audio_bytes)
-        tmp_path = f.name
-
+def _extract_retry_seconds(response: requests.Response, default: float = 5.0) -> float:
+    """بتقرأ 'Please try again in 14.27s' من رسالة خطأ Groq لو موجودة."""
     try:
-        print("Starting transcription...")
-        print("Before transcribe")
-
-        segments, info = whisper.transcribe(
-            tmp_path,
-            language="ar",
-            beam_size=1
-        )
-
-        print("After transcribe")
-
-        texts = []
-
-        for segment in segments:
-            print("Segment:", segment.text)
-            texts.append(segment.text)
-
-        text = " ".join(texts).strip()
-
-        print("Transcript:", text)
-
-        return text
-
+        message = response.json().get("error", {}).get("message", "")
+        match = re.search(r"try again in ([\d.]+)s", message)
+        if match:
+            return float(match.group(1)) + 0.5
     except Exception:
-        print("========== STT ERROR ==========")
-        traceback.print_exc()
-        raise
+        pass
+    return default
 
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
 
-# =========================
-# RAG / LLM
-# =========================
+def _build_messages(question: str, context: str, history: list[dict] | None) -> list[dict]:
+    """
+    بيبني الـ messages array اللي هتتبعت لـ Groq:
+    system prompt → آخر رسائل من المحادثة (لو موجودة) → السؤال الحالي مع الـ context
+    """
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-async def get_answer(question: str, history: list[HistoryItem] | None = None) -> str:
-    print("Question:", question)
+    if history:
+        # ناخد بس آخر MAX_HISTORY_MESSAGES رسالة عشان منبعتش سياق كبير أوي
+        recent_history = history[-MAX_HISTORY_MESSAGES:]
+        for item in recent_history:
+            role = item.get("role")
+            content = item.get("content")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
 
-    # بنحول الـ Pydantic models لـ plain dicts (role/content) عشان rag.py
-    # يستخدمها مباشرة كـ messages جاهزة لـ Groq من غير ما يعتمد على pydantic
-    history_dicts = [item.model_dump() for item in history] if history else []
-
-    answer = await asyncio.to_thread(
-        rag.answer_question,
-        question,
-        history_dicts
+    messages.append(
+        {
+            "role": "user",
+            "content": f"Church knowledge base:\n{context}\n\nQuestion: {question}\n\nAnswer in Arabic only.",
+        }
     )
 
-    print("Answer:", answer)
-
-    return answer
-# =========================
-# Models
-# =========================
-
-class TTSRequest(BaseModel):
-    text: str
+    return messages
 
 
-# =========================
-# Health
-# =========================
-
-@router.get("/health", response_model=HealthResponse)
-async def health_check():
-    return HealthResponse(status="ok")
-
-
-# =========================
-# Chat
-# =========================
-
-@router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    if not request.message.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="Message cannot be empty"
-        )
-
-    try:
-        answer = await get_answer(request.message, request.history)
-
-        return ChatResponse(answer=answer)
-
-    except Exception:
-        traceback.print_exc()
-
-        raise HTTPException(
-            status_code=500,
-            detail="Chat failed"
-        )
+def _call_groq(messages: list[dict]) -> requests.Response:
+    return requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": GROQ_CHAT_MODEL,
+            "temperature": 0.2,
+            "max_tokens": 800,
+            "messages": messages,
+        },
+        timeout=60,
+    )
 
 
-# =========================
-# TTS Endpoint
-# =========================
+def answer_question(question: str, history: list[dict] | None = None) -> str:
+    context = _retrieve_context(question)
+    messages = _build_messages(question, context, history)
 
-@router.post("/tts")
-async def tts_endpoint(request: TTSRequest):
-    try:
-        audio_data = await _text_to_speech(request.text)
+    for attempt in range(MAX_RETRIES + 1):
+        is_last_attempt = attempt == MAX_RETRIES
 
-        return StreamingResponse(
-            io.BytesIO(audio_data),
-            media_type="audio/mpeg"
-        )
+        try:
+            resp = _call_groq(messages)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            print(f"NETWORK ERROR (attempt {attempt + 1}/{MAX_RETRIES + 1}): {exc}")
+            if is_last_attempt:
+                return FALLBACK_MESSAGE
+            time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
+            continue
+        except requests.exceptions.RequestException as exc:
+            print(f"UNEXPECTED REQUEST ERROR (attempt {attempt + 1}/{MAX_RETRIES + 1}): {exc}")
+            if is_last_attempt:
+                return FALLBACK_MESSAGE
+            time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
+            continue
 
-    except Exception:
-        traceback.print_exc()
+        print("STATUS:", resp.status_code)
+        print("BODY:", resp.text)
 
-        raise HTTPException(
-            status_code=500,
-            detail="TTS Failed"
-        )
+        if resp.status_code == 429:
+            if is_last_attempt:
+                return FALLBACK_MESSAGE
+            wait_seconds = _extract_retry_seconds(resp)
+            print(f"RATE LIMITED — waiting {wait_seconds}s before retry")
+            time.sleep(wait_seconds)
+            continue
 
+        if resp.status_code >= 500:
+            if is_last_attempt:
+                return FALLBACK_MESSAGE
+            time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
+            continue
 
-# =========================
-# Voice Endpoint
-# =========================
+        resp.raise_for_status()
 
-# @router.post("/voice")
-# async def voice(audio: UploadFile = File(...)):
-#     try:
-#         print("Voice request received")
+        return resp.json()["choices"][0]["message"]["content"].strip()
 
-#         audio_bytes = await audio.read()
-
-#         question = await asyncio.to_thread(
-#             _speech_to_text,
-#             audio_bytes
-#         )
-
-#         if not question:
-#             raise HTTPException(
-#                 status_code=400,
-#                 detail="Could not transcribe audio"
-#             )
-
-#         answer_text = await asyncio.to_thread(
-#             rag.answer_question,
-#             question
-#         )
-
-#         audio_data = await _text_to_speech(
-#             answer_text
-#         )
-
-#         return StreamingResponse(
-#             io.BytesIO(audio_data),
-#             media_type="audio/mpeg",
-#             headers={
-#                 "X-Answer-Text": answer_text[:500]
-#             }
-#         )
-
-#     except HTTPException:
-#         raise
-
-#     except Exception:
-#         traceback.print_exc()
-
-#         raise HTTPException(
-#             status_code=500,
-#             detail="Voice Failed"
-#         )
-@router.post("/voice")
-async def voice(audio: UploadFile = File(...)):
-    try:
-        audio_bytes = await audio.read()
-
-        question = await asyncio.to_thread(
-            _speech_to_text,
-            audio_bytes
-        )
-
-        if not question:
-            raise HTTPException(
-                status_code=400,
-                detail="Could not transcribe audio"
-            )
-
-        # ملحوظة: /voice لسه مبيستقبلش history من الفرونت إند حاليًا
-        # (sendVoice في api.ts لسه بيبعت الصوت بس). ممكن نضيفها لاحقًا
-        # لو حابين محادثات الصوت تبقى فيها سياق زي الشات النصي.
-        answer_text = await get_answer(question)
-
-        return {
-            "transcript": question,
-            "answer": answer_text
-        }
-
-    except Exception:
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail="Voice Failed"
-        )
+    return FALLBACK_MESSAGE
