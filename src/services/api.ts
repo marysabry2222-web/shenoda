@@ -1,5 +1,5 @@
 import axios, { AxiosError } from 'axios';
-import type { ChatRequest, ChatResponse, HealthResponse } from '../types';
+import type { ChatRequest, ChatResponse, HealthResponse, HistoryItem } from '../types';
 
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -14,6 +14,24 @@ const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * بتحدد هل الخطأ ده يستاهل إعادة محاولة:
+ * - status code من الـ RETRYABLE_STATUS (429, 502, 503, 504)
+ * - أو خطأ شبكة مفيهوش response خالص (ECONNRESET, انقطاع اتصال, DNS...)
+ * - أو timeout من axios نفسه (code === 'ECONNABORTED')
+ */
+function isRetryableError(err: unknown): boolean {
+  if (!(err instanceof AxiosError)) return false;
+
+  const status = err.response?.status;
+  if (status !== undefined) {
+    return RETRYABLE_STATUS.has(status);
+  }
+
+  // مفيش response خالص = مشكلة شبكة (ECONNRESET / Network Error) أو timeout
+  return err.code === 'ECONNABORTED' || err.message === 'Network Error' || !err.response;
 }
 
 /**
@@ -34,10 +52,7 @@ async function withRetry<T>(
     } catch (err) {
       lastError = err;
 
-      const status = err instanceof AxiosError ? err.response?.status : undefined;
-      const isRetryable = status !== undefined && RETRYABLE_STATUS.has(status);
-
-      if (!isRetryable || attempt === maxRetries) {
+      if (!isRetryableError(err) || attempt === maxRetries) {
         throw err;
       }
 
@@ -49,8 +64,11 @@ async function withRetry<T>(
   throw lastError;
 }
 
-export async function sendMessage(message: string): Promise<string> {
-  const payload: ChatRequest = { message };
+export async function sendMessage(
+  message: string,
+  history: HistoryItem[] = []
+): Promise<string> {
+  const payload: ChatRequest = { message, history };
 
   return withRetry(async () => {
     const response = await api.post<ChatResponse>('/chat', payload, {
