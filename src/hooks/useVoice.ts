@@ -56,6 +56,31 @@ interface UseVoiceReturn {
 // أخطاء مؤقتة/غير قاتلة بنتجاهلها ونعيد المحاولة من غير ما نقفل الجلسة
 const RECOVERABLE_ERRORS = new Set(['no-speech', 'audio-capture', 'network']);
 
+// محرك التعرف على الصوت (خصوصًا مع ar-EG) بيعمل أحيانًا "resegmentation":
+// بيرجع يفسر جزء من الكلام اللي فات ويطلعه كـ isFinal تاني في index جديد،
+// فبيتكرر جزء من النص حتى لو الـ index نفسه لم يتكرر.
+// الدالة دي بتشيل أي تداخل (overlap) بين آخر كلمات في الـ buffer وأول كلمات القطعة الجديدة.
+function stripOverlap(bufferText: string, newChunk: string): string {
+  const bufferWords = bufferText.trim().split(/\s+/).filter(Boolean);
+  const newWords = newChunk.trim().split(/\s+/).filter(Boolean);
+
+  if (bufferWords.length === 0 || newWords.length === 0) return newChunk;
+
+  const maxOverlap = Math.min(bufferWords.length, newWords.length, 12); // حد أقصى معقول للبحث
+  let overlapLen = 0;
+
+  for (let len = maxOverlap; len > 0; len--) {
+    const bufferSuffix = bufferWords.slice(-len).join(' ');
+    const newPrefix = newWords.slice(0, len).join(' ');
+    if (bufferSuffix === newPrefix) {
+      overlapLen = len;
+      break;
+    }
+  }
+
+  return newWords.slice(overlapLen).join(' ');
+}
+
 export function useVoice(onAnswer: (text: string) => void): UseVoiceReturn {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -93,40 +118,31 @@ export function useVoice(onAnswer: (text: string) => void): UseVoiceReturn {
 
     const recognition = new SpeechRecognitionImpl();
     recognition.lang = 'ar-EG';
-recognition.continuous = true;
-recognition.interimResults = false;
+    recognition.continuous = true;      // يفضل شغال لحد ما توقفيه
+    recognition.interimResults = true;  // عشان يفضل يبعت partial results ومايقفلش لوحده
 
-recognition.onresult = (event: SpeechRecognitionEvent) => {
-  const startIndex = Math.max(
-    event.resultIndex,
-    lastFinalIndexRef.current + 1
-  );
+    recognition.onstart = () => setIsRecording(true);
 
-  for (let i = startIndex; i < event.results.length; i++) {
-    const result = event.results[i];
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      // بنبدأ من أكبر قيمة بين اللي المتصفح بيقوله (resultIndex) واللي إحنا فعليًا
+      // وصلنا له قبل كده، عشان مانعالجش نفس الـ index مرتين لو المتصفح رجّعه تاني
+      const startIndex = Math.max(event.resultIndex, lastFinalIndexRef.current + 1);
 
-    if (!result.isFinal) continue;
-
-    const chunk = result[0].transcript.trim();
-
-    console.log('FINAL', i, chunk);
-
-    lastFinalIndexRef.current = i;
-
-    // منع تكرار نفس الجملة
-    const existingParts = transcriptBufferRef.current
-      .split(' ')
-      .join(' ')
-      .trim();
-
-    if (
-      chunk &&
-      !existingParts.includes(chunk)
-    ) {
-      transcriptBufferRef.current += chunk + ' ';
-    }
-  }
-};
+      let finalChunk = '';
+      for (let i = startIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          finalChunk += result[0].transcript;
+          lastFinalIndexRef.current = i;
+        }
+      }
+      if (finalChunk) {
+        const deduped = stripOverlap(transcriptBufferRef.current, finalChunk);
+        if (deduped) {
+          transcriptBufferRef.current += deduped + ' ';
+        }
+      }
+    };
 
     // بنسجل هل الخطأ ده لازم يقفل الجلسة نهائي ولا نتجاهله ونسيب onend يعيد المحاولة
     let fatalError = false;
@@ -138,9 +154,7 @@ recognition.onresult = (event: SpeechRecognitionEvent) => {
       }
       fatalError = true;
       isStoppingRef.current = true; // امنع أي إعادة تشغيل تلقائية
-      console.log('Speech Error:', event.error);
-
-      setError(`تعذر التعرف على الصوت: ${event.error}`);
+      setError('تعذر التعرف على الصوت');
       setIsRecording(false);
     };
 
@@ -166,26 +180,20 @@ recognition.onresult = (event: SpeechRecognitionEvent) => {
       finalizeSession();
     };
 
-const finalizeSession = () => {
-  setIsRecording(false);
+    const finalizeSession = () => {
+      setIsRecording(false);
 
-  const text = transcriptBufferRef.current
-    .replace(/\s+/g, ' ')
-    .trim();
+      const text = transcriptBufferRef.current.trim();
+      transcriptBufferRef.current = '';
+      isStoppingRef.current = false;
 
-  console.log('FINAL TRANSCRIPT:', text);
-
-  transcriptBufferRef.current = '';
-  isStoppingRef.current = false;
-
-  if (text) {
-    setIsProcessing(true);
-
-    Promise.resolve(onAnswer(text)).finally(() => {
-      setIsProcessing(false);
-    });
-  }
-};
+      if (text) {
+        setIsProcessing(true);
+        Promise.resolve(onAnswer(text)).finally(() => {
+          setIsProcessing(false);
+        });
+      }
+    };
 
     recognitionRef.current = recognition;
     recognition.start();
