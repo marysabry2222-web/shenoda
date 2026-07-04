@@ -41,6 +41,11 @@ CALL_SILENCE_MS = 700             # سكوت متواصل بالقد ده = ال
 CALL_SILENCE_FRAMES = CALL_SILENCE_MS // CALL_FRAME_MS
 CALL_VAD_AGGRESSIVENESS = 2       # 0 (أقل حساسية) إلى 3 (أعلى حساسية لفلترة الضوضاء)
 
+# لو الجملة اللي اتجمعت أقصر من كده، بنعتبرها ضوضاء/تنفس ونتجاهلها
+# بدل ما نضيّع وقت في STT/LLM/TTS على الفاضي
+CALL_MIN_UTTERANCE_MS = 300
+CALL_MIN_UTTERANCE_BYTES = int(CALL_SAMPLE_RATE * CALL_MIN_UTTERANCE_MS / 1000) * 2
+
 # صوت الرد من Gemini بيرجع PCM16 خام 24kHz - بنقطّعه لشرائح صغيرة
 # قبل الإرسال عشان نحاكي التدفق (streaming) للعميل ونسمح بالإلغاء الفوري
 GEMINI_TTS_SAMPLE_RATE = 24000
@@ -67,53 +72,6 @@ def get_whisper():
         print("✅ Whisper loaded successfully")
 
     return _whisper
-
-
-# =========================
-# TTS (ElevenLabs)
-# # =========================
-# from elevenlabs.client import ElevenLabs
-
-# _elevenlabs_client = None
-
-# def get_elevenlabs():
-#     global _elevenlabs_client
-
-#     if _elevenlabs_client is None:
-#         print("Initializing ElevenLabs client...")
-#         _elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-#         print("✅ ElevenLabs client ready")
-
-#     return _elevenlabs_client
-
-
-# def _text_to_speech_sync(text: str) -> bytes:
-#     try:
-#         print(f"TTS Request: {text[:100]}")
-
-#         client = get_elevenlabs()
-
-#         audio_stream = client.text_to_speech.convert(
-#             voice_id=ELEVENLABS_VOICE_ID,
-#             text=text,
-#             model_id="eleven_multilingual_v2",
-#             output_format="mp3_44100_128",
-#         )
-
-#         audio_data = b"".join(audio_stream)
-
-#         print(f"✅ TTS Success ({len(audio_data)} bytes)")
-
-#         return audio_data
-
-#     except Exception:
-#         print("========== TTS ERROR ==========")
-#         traceback.print_exc()
-#         raise
-
-
-# async def _text_to_speech(text: str) -> bytes:
-#     return await asyncio.to_thread(_text_to_speech_sync, text)
 
 
 # =========================
@@ -175,7 +133,7 @@ def _speech_to_text_pcm(pcm_bytes: bytes) -> str:
     segments, _ = whisper.transcribe(
         audio_array,
         language="ar",
-        beam_size=1
+        beam_size=3
     )
 
     texts = [segment.text for segment in segments]
@@ -337,55 +295,7 @@ async def tts_endpoint(request: TTSRequest):
         )
 
 
-# =========================
-# Voice Endpoint
-# =========================
 
-# @router.post("/voice")
-# async def voice(audio: UploadFile = File(...)):
-#     try:
-#         print("Voice request received")
-
-#         audio_bytes = await audio.read()
-
-#         question = await asyncio.to_thread(
-#             _speech_to_text,
-#             audio_bytes
-#         )
-
-#         if not question:
-#             raise HTTPException(
-#                 status_code=400,
-#                 detail="Could not transcribe audio"
-#             )
-
-#         answer_text = await asyncio.to_thread(
-#             rag.answer_question,
-#             question
-#         )
-
-#         audio_data = await _text_to_speech(
-#             answer_text
-#         )
-
-#         return StreamingResponse(
-#             io.BytesIO(audio_data),
-#             media_type="audio/mpeg",
-#             headers={
-#                 "X-Answer-Text": answer_text[:500]
-#             }
-#         )
-
-#     except HTTPException:
-#         raise
-
-#     except Exception:
-#         traceback.print_exc()
-
-#         raise HTTPException(
-#             status_code=500,
-#             detail="Voice Failed"
-#         )
 @router.post("/voice")
 async def voice(audio: UploadFile = File(...)):
     try:
@@ -547,9 +457,10 @@ async def call_websocket(websocket: WebSocket):
                         is_user_speaking = False
                         silence_frame_count = 0
 
-                        current_task = asyncio.create_task(
-                            _process_utterance(websocket, finished_utterance)
-                        )
+                        if len(finished_utterance) >= CALL_MIN_UTTERANCE_BYTES:
+                            current_task = asyncio.create_task(
+                                _process_utterance(websocket, finished_utterance)
+                            )
 
     except WebSocketDisconnect:
         pass
