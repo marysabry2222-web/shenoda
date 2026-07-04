@@ -121,6 +121,13 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
     const playbackContext = playbackContextRef.current;
     if (!playbackContext) return;
 
+    // دفاعي: بعض المتصفحات بتعلّق (suspend) الـ AudioContext تلقائيًا
+    // لو التاب راح للخلفية أو الشاشة قفلت لحظة - نتأكد إنه شغال قبل
+    // ما نجدول أي صوت جديد.
+    if (playbackContext.state === 'suspended') {
+      playbackContext.resume().catch(() => {});
+    }
+
     const int16 = new Int16Array(buffer);
     const float32 = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i++) {
@@ -200,6 +207,11 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
           playbackContextRef.current = new AudioContext({
             sampleRate: PLAYBACK_SAMPLE_RATE,
           });
+          // بعض المتصفحات (خصوصًا الموبايل) بتفضل الـ AudioContext
+          // "suspended" لو مش استدعيناه resume() بشكل صريح، حتى لو
+          // إنشاءه حصل بعد ضغطة المستخدم على الزرار - فبيتشغل الصوت
+          // برمجيًا بدون أي صوت فعلي يخرج ومن غير أي error يبان.
+          await playbackContextRef.current.resume();
           nextStartTimeRef.current = 0;
 
           await startMicStreaming();
