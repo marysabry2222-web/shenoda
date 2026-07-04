@@ -4,6 +4,7 @@ export type CallStatus =
   | 'idle'
   | 'connecting'
   | 'listening'   // المايك فاتح، السيرفر بيسمع طول الوقت
+  | 'processing'  // المستخدم سكت، السيرفر بيعالج (STT/LLM) قبل الرد
   | 'speaking'    // صوت رد المساعد بيتشغل
   | 'error';
 
@@ -218,6 +219,10 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
               // المستخدم بدأ يتكلم - أوقفي أي صوت شغال فورًا (barge-in)
               stopPlayback();
               setStatus('listening');
+              break;
+
+            case 'processing':
+              setStatus('processing');
               break;
 
             case 'transcript':
