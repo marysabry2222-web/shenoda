@@ -68,8 +68,14 @@ export function ChatPage() {
   <img
     src="/church-bg.jpg"
     alt=""
-    
-     className="w-full h-full object-cover opacity-60 object-[50%_40%] md:object-center"
+    className="
+w-full
+h-full
+object-cover
+opacity-60
+object-[55%_center]
+lg:object-center
+"
   />
   <div className="absolute inset-0 bg-white/60" />
 </div>
