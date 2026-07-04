@@ -69,52 +69,6 @@ def get_whisper():
     return _whisper
 
 
-# =========================
-# TTS (ElevenLabs)
-# # =========================
-# from elevenlabs.client import ElevenLabs
-
-# _elevenlabs_client = None
-
-# def get_elevenlabs():
-#     global _elevenlabs_client
-
-#     if _elevenlabs_client is None:
-#         print("Initializing ElevenLabs client...")
-#         _elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-#         print("✅ ElevenLabs client ready")
-
-#     return _elevenlabs_client
-
-
-# def _text_to_speech_sync(text: str) -> bytes:
-#     try:
-#         print(f"TTS Request: {text[:100]}")
-
-#         client = get_elevenlabs()
-
-#         audio_stream = client.text_to_speech.convert(
-#             voice_id=ELEVENLABS_VOICE_ID,
-#             text=text,
-#             model_id="eleven_multilingual_v2",
-#             output_format="mp3_44100_128",
-#         )
-
-#         audio_data = b"".join(audio_stream)
-
-#         print(f"✅ TTS Success ({len(audio_data)} bytes)")
-
-#         return audio_data
-
-#     except Exception:
-#         print("========== TTS ERROR ==========")
-#         traceback.print_exc()
-#         raise
-
-
-# async def _text_to_speech(text: str) -> bytes:
-#     return await asyncio.to_thread(_text_to_speech_sync, text)
-
 
 # =========================
 # STT
@@ -322,56 +276,6 @@ async def tts_endpoint(request: TTSRequest):
             detail="TTS Failed"
         )
 
-
-# =========================
-# Voice Endpoint
-# =========================
-
-# @router.post("/voice")
-# async def voice(audio: UploadFile = File(...)):
-#     try:
-#         print("Voice request received")
-
-#         audio_bytes = await audio.read()
-
-#         question = await asyncio.to_thread(
-#             _speech_to_text,
-#             audio_bytes
-#         )
-
-#         if not question:
-#             raise HTTPException(
-#                 status_code=400,
-#                 detail="Could not transcribe audio"
-#             )
-
-#         answer_text = await asyncio.to_thread(
-#             rag.answer_question,
-#             question
-#         )
-
-#         audio_data = await _text_to_speech(
-#             answer_text
-#         )
-
-#         return StreamingResponse(
-#             io.BytesIO(audio_data),
-#             media_type="audio/mpeg",
-#             headers={
-#                 "X-Answer-Text": answer_text[:500]
-#             }
-#         )
-
-#     except HTTPException:
-#         raise
-
-#     except Exception:
-#         traceback.print_exc()
-
-#         raise HTTPException(
-#             status_code=500,
-#             detail="Voice Failed"
-#         )
 @router.post("/voice")
 async def voice(audio: UploadFile = File(...)):
     try:
@@ -423,6 +327,7 @@ async def voice(audio: UploadFile = File(...)):
 # Server → Client:
 #   - {"type": "interrupted"}                لما المستخدم يبدأ كلام جديد؛
 #                                             العميل لازم يوقف أي صوت شغال فورًا
+#   - {"type": "processing"}                 لما السكوت يتاكد والسيرفر بدأ STT/LLM
 #   - {"type": "transcript", "text": "..."}  بعد ما الـ STT يخلص
 #   - {"type": "answer_text", "text": "..."} بعد ما الـ LLM يرد
 #   - {"type": "answer_audio_start"}         قبل ما نبعت صوت الرد
@@ -440,6 +345,8 @@ async def _process_utterance(websocket: WebSocket, pcm_audio: bytes) -> None:
     الـ TTS يخلصوا شغلهم على الفاضي.
     """
     try:
+        await websocket.send_json({"type": "processing"})
+
         question = await asyncio.to_thread(_speech_to_text_pcm, pcm_audio)
         if not question:
             return
