@@ -15,5 +15,6 @@ torch==2.7.1
 
 faster-whisper==1.1.1
 ctranslate2==4.6.0
-gTTS==2.5.4
+webrtcvad==2.0.10
+httpx==0.28.1
 huggingface-hub
