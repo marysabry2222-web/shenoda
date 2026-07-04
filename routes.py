@@ -41,10 +41,10 @@ CALL_SILENCE_MS = 700             # سكوت متواصل بالقد ده = ال
 CALL_SILENCE_FRAMES = CALL_SILENCE_MS // CALL_FRAME_MS
 CALL_VAD_AGGRESSIVENESS = 2       # 0 (أقل حساسية) إلى 3 (أعلى حساسية لفلترة الضوضاء)
 
-# لو الجملة اللي اتجمعت أقصر من كده، بنعتبرها ضوضاء/تنفس ونتجاهلها
-# بدل ما نضيّع وقت في STT/LLM/TTS على الفاضي
-CALL_MIN_UTTERANCE_MS = 300
-CALL_MIN_UTTERANCE_BYTES = int(CALL_SAMPLE_RATE * CALL_MIN_UTTERANCE_MS / 1000) * 2
+# أقل عدد فريمات كلام متتالية عشان نعتبرها "بداية كلام حقيقية" ونقاطع
+# بيها أي رد شغال - بتحمي من إن ضوضاء عابرة أو نفس بسيط يلغي المعالجة
+# غلط. 3 فريمات × 20ms = 60ms متواصلة من الكلام الفعلي.
+MIN_SPEECH_FRAMES_TO_INTERRUPT = 3
 
 # صوت الرد من Gemini بيرجع PCM16 خام 24kHz - بنقطّعه لشرائح صغيرة
 # قبل الإرسال عشان نحاكي التدفق (streaming) للعميل ونسمح بالإلغاء الفوري
@@ -72,6 +72,7 @@ def get_whisper():
         print("✅ Whisper loaded successfully")
 
     return _whisper
+
 
 
 # =========================
@@ -133,7 +134,7 @@ def _speech_to_text_pcm(pcm_bytes: bytes) -> str:
     segments, _ = whisper.transcribe(
         audio_array,
         language="ar",
-        beam_size=3
+        beam_size=1
     )
 
     texts = [segment.text for segment in segments]
@@ -294,8 +295,6 @@ async def tts_endpoint(request: TTSRequest):
             detail="TTS Failed"
         )
 
-
-
 @router.post("/voice")
 async def voice(audio: UploadFile = File(...)):
     try:
@@ -413,6 +412,7 @@ async def call_websocket(websocket: WebSocket):
     utterance_buffer = bytearray()  # الفريمات اللي بتتجمع لحد ما الجملة تخلص
     is_user_speaking = False
     silence_frame_count = 0
+    speech_frame_count = 0  # عدد فريمات الكلام المتتالية - لتفادي false positives
     current_task: asyncio.Task | None = None
 
     try:
@@ -435,16 +435,28 @@ async def call_websocket(websocket: WebSocket):
                 is_speech = vad.is_speech(frame, CALL_SAMPLE_RATE)
 
                 if is_speech:
+                    speech_frame_count += 1
+
                     if not is_user_speaking:
-                        # بداية كلام جديد - لو الرد قاعد بيتحضر أو بيتشغل
-                        # عند العميل، نوقفه فورًا (barge-in)
+                        # لسه ماوصلناش لعدد الفريمات الكافي - ممكن تكون
+                        # ضوضاء عابرة، متلغيش المهمة الشغالة لسه
+                        if speech_frame_count < MIN_SPEECH_FRAMES_TO_INTERRUPT:
+                            utterance_buffer.extend(frame)
+                            continue
+
+                        # اتأكدنا إنه كلام حقيقي - دلوقتي بس نعتبرها
+                        # مقاطعة فعلية (barge-in) ولو فيه رد شغال نلغيه
+                        print(
+                            "REAL interrupt detected "
+                            f"(task_done={current_task.done() if current_task else 'N/A'})"
+                        )
                         await websocket.send_json({"type": "interrupted"})
                         if current_task is not None and not current_task.done():
                             current_task.cancel()
                         current_task = None
+                        is_user_speaking = True
 
                     utterance_buffer.extend(frame)
-                    is_user_speaking = True
                     silence_frame_count = 0
 
                 elif is_user_speaking:
@@ -456,11 +468,23 @@ async def call_websocket(websocket: WebSocket):
                         utterance_buffer.clear()
                         is_user_speaking = False
                         silence_frame_count = 0
+                        speech_frame_count = 0
 
-                        if len(finished_utterance) >= CALL_MIN_UTTERANCE_BYTES:
-                            current_task = asyncio.create_task(
-                                _process_utterance(websocket, finished_utterance)
-                            )
+                        print(
+                            f"Utterance finished, {len(finished_utterance)} bytes, "
+                            "starting processing task"
+                        )
+                        current_task = asyncio.create_task(
+                            _process_utterance(websocket, finished_utterance)
+                        )
+                else:
+                    # سكوت والمستخدم مش بيتكلم أصلاً - نصفّر عداد الكلام
+                    # ونمسح أي فريمات ضوضاء عابرة كانت اتضافت تخمينًا
+                    # (قبل ما توصل لـ MIN_SPEECH_FRAMES_TO_INTERRUPT) عشان
+                    # متتسربش وتتلزق في أول الجملة الحقيقية اللي بعدها
+                    speech_frame_count = 0
+                    if not is_user_speaking:
+                        utterance_buffer.clear()
 
     except WebSocketDisconnect:
         pass
