@@ -5,13 +5,14 @@ import asyncio
 import tempfile
 import os
 import traceback
+import wave
 
 import numpy as np
 import webrtcvad
 import httpx
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 
 from faster_whisper import WhisperModel
@@ -72,7 +73,6 @@ def get_whisper():
         print("✅ Whisper loaded successfully")
 
     return _whisper
-
 
 
 # =========================
@@ -248,6 +248,18 @@ async def health_check():
 
 
 # =========================
+# Debug - مؤقت، نشيله بعد ما نحل مشكلة الصوت
+# =========================
+
+@router.get("/debug/last-call-audio")
+async def debug_last_call_audio():
+    path = "/tmp/last_call_utterance.wav"
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="No call audio recorded yet")
+    return FileResponse(path, media_type="audio/wav", filename="last_call_utterance.wav")
+
+
+# =========================
 # Chat
 # =========================
 
@@ -294,6 +306,7 @@ async def tts_endpoint(request: TTSRequest):
             status_code=500,
             detail="TTS Failed"
         )
+
 
 @router.post("/voice")
 async def voice(audio: UploadFile = File(...)):
@@ -474,6 +487,18 @@ async def call_websocket(websocket: WebSocket):
                             f"Utterance finished, {len(finished_utterance)} bytes, "
                             "starting processing task"
                         )
+
+                        # تشخيص مؤقت: نحفظ آخر جملة كملف WAV نقدر نسمعه
+                        # عبر /debug/last-call-audio - نشيل ده بعد ما نحل المشكلة
+                        try:
+                            with wave.open("/tmp/last_call_utterance.wav", "wb") as wf:
+                                wf.setnchannels(1)
+                                wf.setsampwidth(2)
+                                wf.setframerate(CALL_SAMPLE_RATE)
+                                wf.writeframes(finished_utterance)
+                        except Exception:
+                            traceback.print_exc()
+
                         current_task = asyncio.create_task(
                             _process_utterance(websocket, finished_utterance)
                         )
