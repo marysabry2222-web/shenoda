@@ -7,8 +7,8 @@ EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 MIN_SIMILARITY = 0.35
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-# GROQ_CHAT_MODEL = "llama-3.3-70b-versatile"
-GROQ_CHAT_MODEL="llama-3.1-8b-instant"
+GROQ_CHAT_MODEL = "openai/gpt-oss-120b"
+# GROQ_CHAT_MODEL="llama-3.1-8b-instant"
 
 HF_TOKEN: str = os.getenv("HF_TOKEN", "")
 
