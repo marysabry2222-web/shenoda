@@ -216,16 +216,30 @@ TOPIC_FOLDERS: dict[str, list[str]] = {
 
 CLOUDINARY_SEARCH_LIMIT = 50
 IMAGES_PER_ANSWER = 2
-def _detect_topic_folders(question: str, answer: str) -> list[str] | None:
-    """بتدور عن أطول اسم موضوع/شخص معروف متطابق في السؤال أو الرد فقط
-    (مش الـ context الكامل، عشان context بيحتوي كذا موضوع مع بعض وممكن
-    يدي تطابق غلط لموضوع مش ده اللي الرد بيتكلم عنه فعليًا).
-    بترجع قائمة الفولدرات المرتبطة بيه، أو None لو مفيش تطابق."""
-    combined = f"{question} {answer}"
-    sorted_names = sorted(TOPIC_FOLDERS.keys(), key=len, reverse=True)
-    for name in sorted_names:
-        if name in combined:
-            return TOPIC_FOLDERS[name]
+def _detect_topic_folders(
+    question: str,
+    answer: str,
+    history: list[dict] | None = None,
+) -> list[str] | None:
+    """بتدور بالأولوية في السؤال نفسه الأول (أدق مصدر لمعرفة الموضوع
+    الأساسي المقصود)، وبعدين في الرد لو مفيش تطابق في السؤال (زي لو
+    السؤال عام والرد فيه التفاصيل)، وبعدين في آخر تبادل بالمحادثة
+    لو ده سؤال متابعة بضمير ('هات صورة له')."""
+    folders = _match_topic(question)
+    if folders:
+        return folders
+
+    folders = _match_topic(answer)
+    if folders:
+        return folders
+
+    if history:
+        for item in reversed(history[-2:]):
+            content = item.get("content", "")
+            folders = _match_topic(content)
+            if folders:
+                return folders
+
     return None
 
 
