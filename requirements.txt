@@ -4,7 +4,7 @@ python-dotenv==1.0.1
 
 numpy==1.26.4
 faiss-cpu==1.12.0
-
+pip install cloudinary
 requests==2.32.3
 python-multipart==0.0.20
 pydantic==2.10.4
