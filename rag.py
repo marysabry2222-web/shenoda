@@ -216,13 +216,12 @@ TOPIC_FOLDERS: dict[str, list[str]] = {
 
 CLOUDINARY_SEARCH_LIMIT = 50
 IMAGES_PER_ANSWER = 2
-
-
-def _detect_topic_folders(question: str, answer: str, context: str) -> list[str] | None:
-    """بتدور عن أطول اسم موضوع/شخص معروف متطابق (الأطول أولًا عشان
-    'البابا شنودة الثالث' متتلخبطش مع 'أبونا شنودة دوس' مثلًا).
+def _detect_topic_folders(question: str, answer: str) -> list[str] | None:
+    """بتدور عن أطول اسم موضوع/شخص معروف متطابق في السؤال أو الرد فقط
+    (مش الـ context الكامل، عشان context بيحتوي كذا موضوع مع بعض وممكن
+    يدي تطابق غلط لموضوع مش ده اللي الرد بيتكلم عنه فعليًا).
     بترجع قائمة الفولدرات المرتبطة بيه، أو None لو مفيش تطابق."""
-    combined = f"{question} {answer} {context}"
+    combined = f"{question} {answer}"
     sorted_names = sorted(TOPIC_FOLDERS.keys(), key=len, reverse=True)
     for name in sorted_names:
         if name in combined:
@@ -253,7 +252,7 @@ def _get_random_images(folders: list[str], count: int = IMAGES_PER_ANSWER) -> li
 
 
 def _detect_priest_images(question: str, answer: str, context: str) -> list[str]:
-    folders = _detect_topic_folders(question, answer, context)
+    folders = _detect_topic_folders(question, answer)
     if not folders:
         return []
     return _get_random_images(folders)
