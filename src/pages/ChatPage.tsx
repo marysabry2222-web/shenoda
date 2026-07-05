@@ -17,6 +17,7 @@ export function ChatPage() {
     error,
     sendUserMessage,
     addAssistantMessage,
+    addUserMessage,
     clearError,
   } = useChat();
 
@@ -29,13 +30,16 @@ export function ChatPage() {
     [sendUserMessage]
   );
 
+  // addUserMessage (مش sendUserMessage) عن قصد: السؤال أصلاً بيتعالج
+  // بالكامل عبر WebSocket المكالمة نفسه. استخدام sendUserMessage هنا
+  // كان بيبعت طلب /chat مكرر لنفس السؤال (رد مزدوج + توكنز مضاعفة).
   const handleCallTranscript = useCallback(
-    (text: string) => { sendUserMessage(text); },
-    [sendUserMessage]
+    (text: string) => { addUserMessage(text); },
+    [addUserMessage]
   );
 
   const handleCallAnswer = useCallback(
-    (text: string) => addAssistantMessage(text),
+    (text: string, images?: string[]) => addAssistantMessage(text, images),
     [addAssistantMessage]
   );
 
