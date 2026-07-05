@@ -181,6 +181,7 @@ async def _gemini_text_to_speech(text: str) -> bytes:
     مستخدم سلسة وقابلية إلغاء فورية (barge-in) حتى لو التوليد نفسه
     بيحصل دفعة واحدة على السيرفر.
     """
+    print("ENTERED GEMINI TTS")
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
             GEMINI_TTS_URL,
@@ -357,7 +358,7 @@ async def voice(audio: UploadFile = File(...)):
 #   - أي رسالة نصية (JSON) بتتجاهل حاليًا — محجوزة لأوامر تحكم مستقبلية.
 #
 # Server → Client:
-#   - {"type": "interrupted"}                لما المستخدم يبدأ كلام جديد؛
+#   - {"type": "interrupted"}                لما المستخدم يبدأ كلام جديد أثناء تشغيل صوت؛
 #                                             العميل لازم يوقف أي صوت شغال فورًا
 #   - {"type": "processing"}                 لما السكوت يتاكد والسيرفر بدأ STT/LLM
 #   - {"type": "transcript", "text": "..."}  بعد ما الـ STT يخلص
@@ -367,14 +368,30 @@ async def voice(audio: UploadFile = File(...)):
 #   - {"type": "answer_audio_end"}           بعد ما الصوت يخلص
 #
 # التبعيات الجديدة المطلوبة: pip install webrtcvad httpx
+#
+# ملاحظة مهمة عن الـ barge-in:
+# الإلغاء (cancel) بيحصل بس لما فيه صوت رد فعليًا بيتشغل عند العميل
+# (call_state["speaking"] == True). لو المساعد لسه "بيفكر" (STT/LLM/TTS
+# قاعدين شغالين بصمت، قبل ما أي صوت يوصل للعميل)، أي كلام/ضوضاء من
+# المستخدم في اللحظة دي *مبيلغيش* المهمة الشغالة - لأن مفيش صوت أصلاً
+# نقاطعه. المهمة بتكمل عادي وتوصل لآخرها، وبعدها لو فيه utterance جديدة
+# اتجمعت في الأثناء، هتتعالج بعد ما المهمة الحالية تخلص.
 
 
-async def _process_utterance(websocket: WebSocket, pcm_audio: bytes) -> None:
+async def _process_utterance(
+    websocket: WebSocket,
+    pcm_audio: bytes,
+    call_state: dict,
+) -> None:
     """
     STT → LLM → TTS لجملة واحدة كاملة. الدالة دي بتتشغل كـ asyncio.Task
-    منفصلة عشان لو المستخدم قاطع بالكلام (barge-in)، السيرفر يقدر
-    يلغيها فورًا (asyncio.CancelledError) من غير ما يستنى الـ LLM أو
-    الـ TTS يخلصوا شغلهم على الفاضي.
+    منفصلة عشان لو المستخدم قاطع بالكلام أثناء تشغيل الصوت فعليًا
+    (barge-in)، السيرفر يقدر يلغيها فورًا (asyncio.CancelledError).
+
+    call_state["speaking"] بتتحول True بس في اللحظة اللي أول شريحة صوت
+    بتتبعت فعليًا للعميل، وترجع False تاني في أي مخرج من الدالة (نجاح،
+    إلغاء، أو error) - عشان الـ websocket handler يعرف بالظبط إمتى
+    الإلغاء يكون له معنى فعلي.
     """
     try:
         await websocket.send_json({"type": "processing"})
@@ -387,26 +404,23 @@ async def _process_utterance(websocket: WebSocket, pcm_audio: bytes) -> None:
 
         answer_text = await get_answer(question)
         await websocket.send_json({"type": "answer_text", "text": answer_text})
-        print("Before TTS")
 
         audio_data = await _gemini_text_to_speech(answer_text)
-
-        print("After TTS", len(audio_data))
         print("Audio bytes:", len(audio_data))
-        print("Sending audio start")
 
         await websocket.send_json({"type": "answer_audio_start"})
+        call_state["speaking"] = True  # من هنا بس الإلغاء بقى له معنى
 
         for i in range(0, len(audio_data), GEMINI_AUDIO_CHUNK_BYTES):
             chunk = audio_data[i:i + GEMINI_AUDIO_CHUNK_BYTES]
             await websocket.send_bytes(chunk)
             await asyncio.sleep(0)  # نسيب فرصة لـ event loop يعالج cancel لو حصل
-        print("Sending audio end")
+
         await websocket.send_json({"type": "answer_audio_end"})
 
     except asyncio.CancelledError:
-        # اتلغت بسبب barge-in - مفيش داعي نبعت حاجة تانية، الـ "interrupted"
-        # اتبعتت فعلًا لحظة ما المستخدم بدأ يتكلم
+        # اتلغت بسبب barge-in حقيقي أثناء تشغيل الصوت - مفيش داعي نبعت
+        # حاجة تانية، الـ "interrupted" اتبعتت فعلًا لحظة ما المستخدم بدأ يتكلم
         raise
 
     except Exception:
@@ -418,6 +432,9 @@ async def _process_utterance(websocket: WebSocket, pcm_audio: bytes) -> None:
             })
         except Exception:
             pass  # الاتصال ممكن يكون اتقفل بالفعل
+
+    finally:
+        call_state["speaking"] = False
 
 
 @router.websocket("/ws/call")
@@ -432,6 +449,10 @@ async def call_websocket(websocket: WebSocket):
     silence_frame_count = 0
     speech_frame_count = 0  # عدد فريمات الكلام المتتالية - لتفادي false positives
     current_task: asyncio.Task | None = None
+
+    # حالة مشتركة بين الـ handler والـ _process_utterance الحالية - بتقول
+    # لنا هل فيه صوت رد فعليًا بيتشغل دلوقتي عند العميل ولا لأ
+    call_state = {"speaking": False}
 
     try:
         while True:
@@ -457,21 +478,25 @@ async def call_websocket(websocket: WebSocket):
 
                     if not is_user_speaking:
                         # لسه ماوصلناش لعدد الفريمات الكافي - ممكن تكون
-                        # ضوضاء عابرة، متلغيش المهمة الشغالة لسه
+                        # ضوضاء عابرة، مننفعلش على أساسها لسه
                         if speech_frame_count < MIN_SPEECH_FRAMES_TO_INTERRUPT:
                             utterance_buffer.extend(frame)
                             continue
 
-                        # اتأكدنا إنه كلام حقيقي - دلوقتي بس نعتبرها
-                        # مقاطعة فعلية (barge-in) ولو فيه رد شغال نلغيه
-                        print(
-                            "REAL interrupt detected "
-                            f"(task_done={current_task.done() if current_task else 'N/A'})"
-                        )
-                        await websocket.send_json({"type": "interrupted"})
+                        # اتأكدنا إنه كلام حقيقي (60ms+). دلوقتي نفرّق:
+                        # لو فيه صوت رد بيتشغل فعليًا → دي مقاطعة حقيقية،
+                        # نلغي ونبعت interrupted. لو المساعد لسه بيفكر
+                        # بصمت (مفيش صوت اتبعت للعميل لسه) → متلغيش حاجة،
+                        # سيبي المهمة تكمل وخلاص.
                         if current_task is not None and not current_task.done():
-                            current_task.cancel()
-                        current_task = None
+                            if call_state.get("speaking"):
+                                print("REAL interrupt detected - cancelling in-progress speech")
+                                await websocket.send_json({"type": "interrupted"})
+                                current_task.cancel()
+                                current_task = None
+                            else:
+                                print("Speech detected while still processing (no audio yet) - NOT cancelling")
+
                         is_user_speaking = True
 
                     utterance_buffer.extend(frame)
@@ -487,6 +512,14 @@ async def call_websocket(websocket: WebSocket):
                         is_user_speaking = False
                         silence_frame_count = 0
                         speech_frame_count = 0
+
+                        # لو لسه فيه مهمة سابقة شغالة (بتفكر أو بتتكلم)،
+                        # منبدأش وحدة جديدة فوقها - كده بنمنع تداخل الصوت
+                        # وتضارب طلبات الـ LLM. الجملة دي هتتجاهل ببساطة
+                        # (المستخدم هيحتاج يعيدها بعد ما الرد الحالي يخلص).
+                        if current_task is not None and not current_task.done():
+                            print("Previous response still in progress - ignoring this utterance")
+                            continue
 
                         print(
                             f"Utterance finished, {len(finished_utterance)} bytes, "
@@ -505,7 +538,7 @@ async def call_websocket(websocket: WebSocket):
                             traceback.print_exc()
 
                         current_task = asyncio.create_task(
-                            _process_utterance(websocket, finished_utterance)
+                            _process_utterance(websocket, finished_utterance, call_state)
                         )
                 else:
                     # سكوت والمستخدم مش بيتكلم أصلاً - نصفّر عداد الكلام
