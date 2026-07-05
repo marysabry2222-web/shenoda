@@ -28,6 +28,29 @@ export function ChatBubble({ message, isSpeaking = false }: ChatBubbleProps) {
         ${isSpeaking ? 'border-gold-400 shadow-gold-100 shadow-md' : 'border-church-200'}
       `}>
         {message.content}
+
+        {/* صور مرتبطة بالرد (لو موجودة) */}
+        {message.images && message.images.length > 0 && (
+          <div className="flex gap-2 mt-3 justify-end flex-wrap">
+            {message.images.map((src, i) => (
+              
+                key={i}
+                href={src}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block rounded-xl overflow-hidden border border-church-200 shadow-sm hover:opacity-90 transition-opacity"
+              >
+                <img
+                  src={src}
+                  alt=""
+                  className="w-28 h-28 object-cover"
+                  loading="lazy"
+                />
+              </a>
+            ))}
+          </div>
+        )}
+
         {/* Speaking indicator */}
         {isSpeaking && (
           <div className="flex gap-1 mt-2 justify-end">
