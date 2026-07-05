@@ -215,14 +215,14 @@ async def _gemini_text_to_speech(text: str) -> bytes:
 # RAG / LLM
 # =========================
 
-async def get_answer(question: str, history: list[HistoryItem] | None = None) -> str:
+async def get_answer(question: str, history: list[HistoryItem] | None = None) -> tuple[str, list[str]]:
     print("Question:", question)
 
     # بنحول الـ Pydantic models لـ plain dicts (role/content) عشان rag.py
     # يستخدمها مباشرة كـ messages جاهزة لـ Groq من غير ما يعتمد على pydantic
     history_dicts = [item.model_dump() for item in history] if history else []
 
-    answer = await asyncio.to_thread(
+    answer, images = await asyncio.to_thread(
         rag.answer_question,
         question,
         history_dicts
@@ -230,7 +230,7 @@ async def get_answer(question: str, history: list[HistoryItem] | None = None) ->
 
     print("Answer:", answer)
 
-    return answer
+    return answer, images
 # =========================
 # Models
 # =========================
@@ -273,9 +273,9 @@ async def chat(request: ChatRequest):
         )
 
     try:
-        answer = await get_answer(request.message, request.history)
+        answer, images = await get_answer(request.message, request.history)
 
-        return ChatResponse(answer=answer)
+        return ChatResponse(answer=answer, images=images)
 
     except Exception:
         traceback.print_exc()
@@ -328,11 +328,12 @@ async def voice(audio: UploadFile = File(...)):
         # ملحوظة: /voice لسه مبيستقبلش history من الفرونت إند حاليًا
         # (sendVoice في api.ts لسه بيبعت الصوت بس). ممكن نضيفها لاحقًا
         # لو حابين محادثات الصوت تبقى فيها سياق زي الشات النصي.
-        answer_text = await get_answer(question)
+        answer_text, images = await get_answer(question)
 
         return {
             "transcript": question,
-            "answer": answer_text
+            "answer": answer_text,
+            "images": images
         }
 
     except Exception:
@@ -402,7 +403,7 @@ async def _process_utterance(
 
         await websocket.send_json({"type": "transcript", "text": question})
 
-        answer_text = await get_answer(question)
+        answer_text, _images = await get_answer(question)
         await websocket.send_json({"type": "answer_text", "text": answer_text})
 
         audio_data = await _gemini_text_to_speech(answer_text)
