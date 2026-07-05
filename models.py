@@ -1,5 +1,4 @@
 from typing import Literal, Optional
-
 from pydantic import BaseModel
 
 
@@ -15,6 +14,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str
+    images: Optional[list[str]] = None
 
 
 class HealthResponse(BaseModel):
