@@ -165,56 +165,103 @@ MAX_HISTORY_MESSAGES = 4
 # =========================
 # خريطة: اسم الأب زي ما بيتكتب في الأسئلة/الردود -> مسار الفولدر بالظبط
 # زي ما هو موجود في Cloudinary (مثال: "الاباء/ابونا ويصا")
-PRIEST_FOLDERS: dict[str, str] = {
-    "ابونا ويصا": "الاباء/ابونا ويصا",
-    "ابونا ابراهيم عطية": "الاباء/ابونا ابراهيم عطية",
-    "ابونا اغاثون": "الاباء/ابونا اغاثون",
-    "ابونا جرجس": "الاباء/ابونا جرجس",
-    "ابونا شنودة": "الاباء/ابونا شنودة",
-    "ابونا مينا": "الاباء/ابونا مينا",
-    # ... زودي باقي أسماء الفولدرات اللي شايفاها في Cloudinary بنفس الإملاء بالظبط
+# =========================
+# صور مرتبطة بمواضيع/أشخاص معينين - بتتسحب عشوائي من فولدر (أو أكتر)
+# في Cloudinary لو الرد بيتكلم عن حد/حاجة منهم
+# =========================
+# كل موضوع ممكن يترتبط بأكتر من فولدر (مثلاً "الكنيسة القديمة" بتجمع
+# صور من كذا فولدر مختلف عن شكل المبنى قديمًا)
+TOPIC_FOLDERS: dict[str, list[str]] = {
+    # الآباء الكهنة
+    "أبونا شنودة دوس": ["الاباء/ابونا شنودة"],
+    "القمص إبراهيم عطية": ["الاباء/ابونا ابراهيم عطية"],
+    "أبونا إبراهيم عطية": ["الاباء/ابونا ابراهيم عطية"],
+    "القمص جرجس مرقس": ["الاباء/ابونا جرجس"],
+    "أبونا أغاثون حنا": ["الاباء/ابونا اغاثون"],
+    "أبونا مينا زكي سليمان": ["الاباء/ابونا مينا"],
+    "القمص ويصا القمص جرجس": ["الاباء/ابونا ويصا"],
+    "أبونا ويصا": ["الاباء/ابونا ويصا"],
+
+    # زيارات البطاركة
+    "البابا شنودة الثالث": ["زيارات البطاركة/البابا شنودة 1977"],
+    "البابا كيرلس السادس": ["زيارات البطاركة/البابا كيرلس 1960"],
+    "البابا تواضروس الثاني": ["زيارات البطاركة/البابا تواضروس 2015"],
+
+    # خدمات الكنيسة (عام)
+    "خدمات الكنيسة": ["خدمات"],
+
+    # شكل الكنيسة/المبنى قديمًا - بتجمع من كل الفولدرات اللي فيها
+    # صور تاريخية للمبنى (قبل التعمير، من برا، الكنيسة القديمة)
+    "الكنيسة القديمة": [
+        "صور كنيسة القديمة من 77 ل 2007",
+        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
+        "كنيسة خارجي 90",
+    ],
+    "بناء الكنيسة": [
+        "صور كنيسة القديمة من 77 ل 2007",
+        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
+        "كنيسة خارجي 90",
+    ],
+    "نشأة الكنيسة": [
+        "صور كنيسة القديمة من 77 ل 2007",
+        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
+        "كنيسة خارجي 90",
+    ],
+    "تعمير الكنيسة": [
+        "صور كنيسة القديمة من 77 ل 2007",
+        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
+        "كنيسة خارجي 90",
+    ],
 }
 
-# عدد النتائج اللي بنجيبها من Cloudinary قبل ما نختار عشوائي منها -
-# رقم أعلى من الصور المعروضة فعليًا عشان يبقى فيه تنويع حقيقي بين الطلبات
 CLOUDINARY_SEARCH_LIMIT = 50
 IMAGES_PER_ANSWER = 2
 
 
-def _detect_priest_folder(question: str, answer: str, context: str) -> str | None:
-    """بتدور عن اسم أب كاهن معروف في السؤال أو الرد أو الـ context.
-    أول تطابق بس - عشان منجيبش صور غلط لو أكتر من اسم اتذكر في نفس الرد."""
+def _detect_topic_folders(question: str, answer: str, context: str) -> list[str] | None:
+    """بتدور عن أطول اسم موضوع/شخص معروف متطابق (الأطول أولًا عشان
+    'البابا شنودة الثالث' متتلخبطش مع 'أبونا شنودة دوس' مثلًا).
+    بترجع قائمة الفولدرات المرتبطة بيه، أو None لو مفيش تطابق."""
     combined = f"{question} {answer} {context}"
-    for name, folder in PRIEST_FOLDERS.items():
+    sorted_names = sorted(TOPIC_FOLDERS.keys(), key=len, reverse=True)
+    for name in sorted_names:
         if name in combined:
-            return folder
+            return TOPIC_FOLDERS[name]
     return None
 
 
-def _get_random_images(folder: str, count: int = IMAGES_PER_ANSWER) -> list[str]:
-    """بتسحب صور عشوائية من فولدر معين في Cloudinary."""
-    try:
-        result = (
-            cloudinary.search.Search()
-            .expression(f'folder:"{folder}"')
-            .max_results(CLOUDINARY_SEARCH_LIMIT)
-            .execute()
-        )
-        resources = result.get("resources", [])
-        if not resources:
-            return []
-        random.shuffle(resources)
-        return [r["secure_url"] for r in resources[:count]]
-    except Exception as exc:
-        print("CLOUDINARY SEARCH ERROR:", exc)
+def _get_random_images(folders: list[str], count: int = IMAGES_PER_ANSWER) -> list[str]:
+    """بتجمع الصور من كل الفولدرات المدّاة، وبعدين تسحب عشوائي منها."""
+    all_resources = []
+    for folder in folders:
+        try:
+            result = (
+                cloudinary.search.Search()
+                .expression(f'folder:"{folder}"')
+                .max_results(CLOUDINARY_SEARCH_LIMIT)
+                .execute()
+            )
+            all_resources.extend(result.get("resources", []))
+        except Exception as exc:
+            print(f"CLOUDINARY SEARCH ERROR (folder={folder}):", exc)
+
+    if not all_resources:
         return []
+
+    random.shuffle(all_resources)
+    return [r["secure_url"] for r in all_resources[:count]]
 
 
 def _detect_priest_images(question: str, answer: str, context: str) -> list[str]:
-    folder = _detect_priest_folder(question, answer, context)
-    if not folder:
+    folders = _detect_topic_folders(question, answer, context)
+    if not folders:
         return []
-    return _get_random_images(folder)
+    return _get_random_images(folders)
+
+# عدد النتائج اللي بنجيبها من Cloudinary قبل ما نختار عشوائي منها -
+# رقم أعلى من الصور المعروضة فعليًا عشان يبقى فيه تنويع حقيقي بين الطلبات
+
+
 
 
 def load_resources():
