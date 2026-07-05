@@ -411,11 +411,23 @@ def _get_images(
     return all_urls[:count]
 
 
+# الردود دي معناها "مفيش معلومة/مفيش رد فعلي" - لو الرد طلع واحد منهم
+# بالظبط، منرفقش صور خالص، حتى لو السؤال بيتكلم عن شخص معروف عندنا صوره
+NO_INFO_ANSWERS = {
+    FALLBACK_MESSAGE,
+    "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا.",
+}
+
+
 def _detect_priest_images(
     question: str,
     answer: str,
     history: list[dict] | None = None,
 ) -> list[str]:
+    if answer.strip() in NO_INFO_ANSWERS:
+        print("IMAGES: الرد اعتذار/فولباك - مفيش صور هترجع مهما كان السؤال")
+        return []
+
     folders, source = _detect_topic_folders(question, answer, history)
 
     if not folders:
