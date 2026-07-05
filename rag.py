@@ -3,38 +3,20 @@ import re
 import time
 import math
 import random
+import json
+from pathlib import Path
 from collections import Counter
 
 import requests
-import cloudinary
-import cloudinary.search
 from config import (
     CHUNKS_PATH,
     GROQ_API_KEY,
     GROQ_CHAT_MODEL,
     TOP_K,
-    CLOUDINARY_CLOUD_NAME,
-    CLOUDINARY_API_KEY,
-    CLOUDINARY_API_SECRET,
-)
-
-cloudinary.config(
-    cloud_name=CLOUDINARY_CLOUD_NAME,
-    api_key=CLOUDINARY_API_KEY,
-    api_secret=CLOUDINARY_API_SECRET,
-    secure=True,
 )
 
 _chunks: list[str] = []
 
-# =========================
-# Retrieval خفيف (BM25-lite) - "واعي بالسياق"
-# =========================
-# الفرق عن BM25 العادي: بدل ما نبحث بكلمات السؤال الحالي بس، بندمج
-# كلمات آخر رسايل المحادثة (history) مع السؤال قبل التسجيل. كده أسئلة
-# متابعة زي "طب عرفني عنه" أو "وهو ده مين" (من غير كلمات مفتاحية واضحة)
-# لسه بتلاقي الـ chunk الصح، لأن كلمات الرسالة اللي فاتت (زي اسم
-# الشخص) بتفضل موجودة في البحث.
 _AR_STOPWORDS = {
     "في", "من", "الى", "إلى", "على", "عن", "و", "أو", "ثم", "أن", "إن",
     "هذا", "هذه", "ذلك", "تلك", "هو", "هي", "هم", "كان", "كانت", "يكون",
@@ -57,8 +39,6 @@ _avg_doc_len: float = 0.0
 BM25_K1 = 1.5
 BM25_B = 0.75
 
-# قد إيه رسايل من الهيستوري بتتضاف لكلمات البحث (غير الـ history اللي
-# بيتبعت فعليًا كسياق محادثة لـ Groq - ده منفصل، شوفي MAX_HISTORY_MESSAGES)
 RETRIEVAL_HISTORY_WINDOW = 2
 
 
@@ -95,8 +75,6 @@ def _bm25_score(query_tokens: list[str], doc_index: int) -> float:
 
 
 def _build_retrieval_query(question: str, history: list[dict] | None) -> str:
-    """بتضيف كلمات آخر رسايل المحادثة لكلمات السؤال، عشان أسئلة المتابعة
-    (من غير كلمات مفتاحية واضحة) لسه تلاقي الـ chunk الصح."""
     parts = [question]
     if history:
         recent = history[-RETRIEVAL_HISTORY_WINDOW:]
@@ -108,8 +86,6 @@ def _build_retrieval_query(question: str, history: list[dict] | None) -> str:
 
 
 def _retrieve_context(question: str, history: list[dict] | None = None, top_k: int = TOP_K) -> str:
-    """بترجع أقرب top_k chunks بس (مش كل الـ 11) - بحث واعي بسياق
-    المحادثة، مش بس بكلمات السؤال الحالي لوحدها."""
     if not _chunk_token_lists:
         _build_bm25_index()
 
@@ -124,7 +100,6 @@ def _retrieve_context(question: str, history: list[dict] | None = None, top_k: i
     top_indices = [i for score, i in scores[:top_k] if score > 0]
 
     if not top_indices:
-        # مفيش تطابق كلمات حقيقي - رجّعي أول top_k chunks بدل ما ترجعي فاضي
         top_indices = list(range(min(top_k, len(_chunks))))
 
     selected = [_chunks[i] for i in top_indices]
@@ -150,33 +125,14 @@ SYSTEM_PROMPT = """You are شنودة, an AI assistant for Anba Shenouda Church 
 - Be warm, respectful, and natural.
 """
 
-# رسالة بديلة تتقال للمستخدم لو كل محاولات الاتصال بـ Groq فشلت
 FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، ممكن تجرب تاني بعد شوية؟"
 
 MAX_RETRIES = 3
-NETWORK_ERROR_BASE_DELAY = 2  # ثواني، بيتضاعف مع كل محاولة (2, 4, 8)
+NETWORK_ERROR_BASE_DELAY = 2
 
-# عدد رسايل الهيستوري اللي بتتبعت كسياق محادثة كامل لـ Groq (منفصل عن
-# RETRIEVAL_HISTORY_WINDOW اللي بيتستخدم بس لتحسين البحث عن الـ chunks)
 MAX_HISTORY_MESSAGES = 4
 
-# =========================
-# صور الآباء الكهنة - بتتسحب عشوائي من فولدر كل أب كاهن في Cloudinary
-# =========================
-# خريطة: اسم الأب زي ما بيتكتب في الأسئلة/الردود -> مسار الفولدر بالظبط
-# زي ما هو موجود في Cloudinary (مثال: "الاباء/ابونا ويصا")
-# =========================
-# صور مرتبطة بمواضيع/أشخاص معينين - بتتسحب عشوائي من فولدر (أو أكتر)
-# في Cloudinary لو الرد بيتكلم عن حد/حاجة منهم
-# =========================
-# كل موضوع ممكن يترتبط بأكتر من فولدر (مثلاً "الكنيسة القديمة" بتجمع
-# صور من كذا فولدر مختلف عن شكل المبنى قديمًا)
-# =========================
-# صور مرتبطة بمواضيع/أشخاص معينين - بتتسحب عشوائي من فولدر (أو أكتر)
-# في Cloudinary لو الرد بيتكلم عن حد/حاجة منهم
-# =========================
 TOPIC_FOLDERS: dict[str, list[str]] = {
-    # الآباء الكهنة
     "أبونا شنودة دوس": ["الاباء/ابونا شنودة"],
     "القمص إبراهيم عطية": ["الاباء/ابونا ابراهيم عطية"],
     "أبونا إبراهيم عطية": ["الاباء/ابونا ابراهيم عطية"],
@@ -186,15 +142,12 @@ TOPIC_FOLDERS: dict[str, list[str]] = {
     "القمص ويصا القمص جرجس": ["الاباء/ابونا ويصا"],
     "أبونا ويصا": ["الاباء/ابونا ويصا"],
 
-    # زيارات البطاركة
     "البابا شنودة الثالث": ["زيارات البطاركة/البابا شنودة 1977"],
     "البابا كيرلس السادس": ["زيارات البطاركة/البابا كيرلس 1960"],
     "البابا تواضروس الثاني": ["زيارات البطاركة/البابا تواضروس 2015"],
 
-    # خدمات الكنيسة (عام)
     "خدمات الكنيسة": ["خدمات"],
 
-    # شكل الكنيسة/المبنى قديمًا
     "الكنيسة القديمة": [
         "صور كنيسة القديمة من 77 ل 2007",
         "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
@@ -217,14 +170,47 @@ TOPIC_FOLDERS: dict[str, list[str]] = {
     ],
 }
 
-CLOUDINARY_SEARCH_LIMIT = 50
 IMAGES_PER_ANSWER = 2
+
+# =========================
+# قراءة الصور من assets.json (تفريغ ثابت لكل صور Cloudinary) بدل
+# استدعاء Cloudinary Search API لايف - أسرع، وميحتاجش API key/secret
+# وقت التشغيل خالص. الملف ده لازم يكون جنب باقي ملفات الباك اند
+# (نفس مكان chunks.pkl)، وتحدّثيه بـ سكريبت التصدير كل ما تضيفي صور
+# جديدة على Cloudinary.
+# =========================
+ASSETS_JSON_PATH = "assets.json"
+
+# دلوقتي: dict {اسم المجلد: [رابط1, رابط2, ...]}
+_folder_to_images: dict[str, list[str]] = {}
+
+
+def _load_assets_json():
+    global _folder_to_images
+
+    path = Path(ASSETS_JSON_PATH)
+    if not path.exists():
+        print(f"ASSETS: {ASSETS_JSON_PATH} غير موجود - الصور مش هتظهر")
+        _folder_to_images = {}
+        return
+
+    with open(path, "r", encoding="utf-8") as f:
+        assets = json.load(f)
+
+    grouped: dict[str, list[str]] = {}
+    for asset in assets:
+        folder = asset.get("folder", "")
+        url = asset.get("url")
+        if not folder or not url:
+            continue  # نتجاهل صور samples الافتراضية (folder فاضي)
+        grouped.setdefault(folder, []).append(url)
+
+    _folder_to_images = grouped
+    total_images = sum(len(v) for v in grouped.values())
+    print(f"ASSETS: تم تحميل {total_images} صورة عبر {len(grouped)} مجلد من {ASSETS_JSON_PATH}")
 
 
 def _normalize_arabic(text: str) -> str:
-    """بتوحّد أشكال الحروف المختلفة اللي بتتكتب بطرق متعددة في العربي
-    (أ/إ/آ/ا، ة/ه، ى/ي) وبتشيل التشكيل، عشان المطابقة النصية
-    متتأثرش بفروق الكتابة."""
     text = re.sub(r"[إأآا]", "ا", text)
     text = re.sub(r"ة", "ه", text)
     text = re.sub(r"ى", "ي", text)
@@ -233,8 +219,6 @@ def _normalize_arabic(text: str) -> str:
 
 
 def _match_topic(text: str) -> list[str] | None:
-    """بتدور عن أطول اسم موضوع/شخص معروف متطابق جوه نص معين،
-    بعد توحيد أشكال الحروف المتشابهة."""
     normalized_text = _normalize_arabic(text)
     sorted_names = sorted(TOPIC_FOLDERS.keys(), key=len, reverse=True)
     for name in sorted_names:
@@ -248,9 +232,6 @@ def _detect_topic_folders(
     answer: str,
     history: list[dict] | None = None,
 ) -> list[str] | None:
-    """بتدور بالأولوية في السؤال نفسه الأول (أدق مصدر لمعرفة الموضوع
-    الأساسي المقصود)، وبعدين في الرد لو مفيش تطابق في السؤال، وبعدين
-    في آخر تبادل بالمحادثة لو ده سؤال متابعة بضمير ('هات صورة له')."""
     folders = _match_topic(question)
     if folders:
         return folders
@@ -270,25 +251,20 @@ def _detect_topic_folders(
 
 
 def _get_random_images(folders: list[str], count: int = IMAGES_PER_ANSWER) -> list[str]:
-    """بتجمع الصور من كل الفولدرات المدّاة، وبعدين تسحب عشوائي منها."""
-    all_resources = []
-    for folder in folders:
-        try:
-            result = (
-                cloudinary.search.Search()
-                .expression(f'folder:"{folder}"')
-                .max_results(CLOUDINARY_SEARCH_LIMIT)
-                .execute()
-            )
-            all_resources.extend(result.get("resources", []))
-        except Exception as exc:
-            print(f"CLOUDINARY SEARCH ERROR (folder={folder}):", exc)
+    """بتجمع روابط الصور من كل الفولدرات المطلوبة (من الكاش المحمّل من
+    assets.json)، وتسحب عشوائي منها - من غير أي استدعاء شبكة."""
+    if not _folder_to_images:
+        _load_assets_json()
 
-    if not all_resources:
+    all_urls: list[str] = []
+    for folder in folders:
+        all_urls.extend(_folder_to_images.get(folder, []))
+
+    if not all_urls:
         return []
 
-    random.shuffle(all_resources)
-    return [r["secure_url"] for r in all_resources[:count]]
+    random.shuffle(all_urls)
+    return all_urls[:count]
 
 
 def _detect_priest_images(
@@ -300,10 +276,6 @@ def _detect_priest_images(
     if not folders:
         return []
     return _get_random_images(folders)
-# عدد النتائج اللي بنجيبها من Cloudinary قبل ما نختار عشوائي منها -
-# رقم أعلى من الصور المعروضة فعليًا عشان يبقى فيه تنويع حقيقي بين الطلبات
-
-
 
 
 def load_resources():
@@ -314,12 +286,12 @@ def load_resources():
     _chunks = [c["text"] if isinstance(c, dict) else c for c in _chunks]
 
     _build_bm25_index()
+    _load_assets_json()
 
     print(f"✅ Ready — {len(_chunks)} chunks")
 
 
 def _extract_retry_seconds(response: requests.Response, default: float = 5.0) -> float:
-    """بتقرأ 'Please try again in 14.27s' من رسالة خطأ Groq لو موجودة."""
     try:
         message = response.json().get("error", {}).get("message", "")
         match = re.search(r"try again in ([\d.]+)s", message)
