@@ -204,6 +204,11 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
           playbackContextRef.current = new AudioContext({
             sampleRate: PLAYBACK_SAMPLE_RATE,
           });
+          console.log("Before resume:", playbackContextRef.current.state);
+
+          await playbackContextRef.current.resume();
+
+          console.log("After resume:", playbackContextRef.current.state);
           nextStartTimeRef.current = 0;
 
           await startMicStreaming();
@@ -252,7 +257,9 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
           }
         } else {
           // شريحة صوت PCM خام (ArrayBuffer) من رد المساعد
+          console.log("Audio", event.data.byteLength);
           scheduleAudioChunk(event.data as ArrayBuffer);
+          
         }
       };
 
