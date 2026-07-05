@@ -389,6 +389,7 @@ async def _process_utterance(websocket: WebSocket, pcm_audio: bytes) -> None:
         await websocket.send_json({"type": "answer_text", "text": answer_text})
 
         audio_data = await _gemini_text_to_speech(answer_text)
+        print("TTS bytes:", len(audio_data))
 
         await websocket.send_json({"type": "answer_audio_start"})
 
