@@ -4,8 +4,6 @@ import time
 import math
 from collections import Counter
 
-import numpy as np
-import faiss
 import requests
 from config import (
     CHUNKS_PATH,
@@ -15,8 +13,6 @@ from config import (
 )
 
 _chunks: list[str] = []
-_index: faiss.Index | None = None
-_embeddings: np.ndarray | None = None
 
 # =========================
 # Retrieval خفيف (BM25-lite) - من غير أي مكتبات إضافية
@@ -112,7 +108,7 @@ def _retrieve_context(question: str, top_k: int = TOP_K) -> str:
 SYSTEM_PROMPT = """You are an AI assistant named شنودة for Anba Shenouda Church in Alexandria, Egypt.
 STRICT RULES:
 - Your name is شنودة. If asked who you are, say: "أنا شنودة، مساعد ذكي خاص بكنيسة الأنبا شنودة."
-- Answer ONLY in Arabic.
+- Answer ONLY in Arabic. Every single word must be Arabic - no English, Spanish, French, or any other language words or letters anywhere in your answer, not even one word (e.g. never write connector words like "quienes", "who", "which" in another language).
 - Answer ONLY using the provided context. Never invent information.
 - If the answer is not in the context, say exactly: "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا."
 - Never say you are a priest or bishop.
@@ -126,21 +122,22 @@ FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، مم
 MAX_RETRIES = 3
 NETWORK_ERROR_BASE_DELAY = 2  # ثواني، بيتضاعف مع كل محاولة (2, 4, 8)
 
-MAX_HISTORY_MESSAGES = 10
+MAX_HISTORY_MESSAGES = 2
 
 
 def load_resources():
-    global _chunks, _index, _embeddings
+    """
+    بتحمّل chunks.pkl بس. مش محتاجين نحمّل embeddings.npy أو نبني فهرس
+    FAISS خالص - الـ retrieval الحالي (BM25-lite فوق) بيعتمد على تطابق
+    كلمات النص مباشرة، مش على embeddings محفوظة. ده كان سبب البطء
+    القديم على Railway (تحميل موديل من HuggingFace وقت startup) - وبما
+    إننا مش مستخدمينه أصلاً في البحث، شلناه بالكامل.
+    """
+    global _chunks
     print("Loading chunks...")
     with open(CHUNKS_PATH, "rb") as f:
         _chunks = pickle.load(f)
     _chunks = [c["text"] if isinstance(c, dict) else c for c in _chunks]
-
-    print("Loading embeddings from disk...")
-    _embeddings = np.load("embeddings.npy").astype(np.float32)
-    faiss.normalize_L2(_embeddings)
-    _index = faiss.IndexFlatIP(_embeddings.shape[1])
-    _index.add(_embeddings)
 
     _build_bm25_index()
 
@@ -157,6 +154,21 @@ def _extract_retry_seconds(response: requests.Response, default: float = 5.0) ->
     except Exception:
         pass
     return default
+
+
+# لو نسبة الحروف اللاتينية في الرد عالية، غالبًا فيه "تسرب لغوي" (كلمة
+# من لغة تانية اندسّت في النص) - ظاهرة معروفة مع الموديلات الصغيرة.
+_LATIN_RE = re.compile(r"[a-zA-Z]")
+
+
+def _has_language_leak(text: str) -> bool:
+    letters = re.findall(r"[^\W\d_]", text, flags=re.UNICODE)
+    if not letters:
+        return False
+    latin_count = len(_LATIN_RE.findall(text))
+    # نسمح بنسبة صغيرة (أسماء أو مصطلحات إنجليزية مقصودة أحيانًا)، لكن
+    # أي نسبة أعلى من كده تقريبًا مؤكد إنها تسرب لغوي غير مقصود
+    return latin_count > 0 and (latin_count / len(letters)) > 0.05
 
 
 def _build_messages(question: str, context: str, history: list[dict] | None) -> list[dict]:
@@ -239,6 +251,15 @@ def answer_question(question: str, history: list[dict] | None = None) -> str:
 
         resp.raise_for_status()
 
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        answer = resp.json()["choices"][0]["message"]["content"].strip()
+
+        # بس تسجيل في اللوج للمراقبة - من غير أي retry أو تأخير إضافي،
+        # لأن المكالمة الصوتية حساسة جدًا للـ latency. التعليمة المقوّاة
+        # في SYSTEM_PROMPT هي خط الدفاع الأساسي. لو الظاهرة استمرت كتير
+        # في اللوج بعد كده، وقتها نفكر في حل تاني (موديل أكبر مثلاً).
+        if _has_language_leak(answer):
+            print("LANGUAGE LEAK DETECTED (not retrying, logged for monitoring):", answer[:150])
+
+        return answer
 
     return FALLBACK_MESSAGE
