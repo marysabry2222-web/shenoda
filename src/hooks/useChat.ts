@@ -39,6 +39,13 @@ export function useChat(): UseChatReturn {
   // بتاعته (وده كان هيسبب إعادة إنشاء send() مع كل رسالة جديدة).
   const messagesRef = useRef<Message[]>([]);
 
+  // حماية إضافية ضد إرسال مكرر (زي ضغطتين قريبتين جدًا على Enter، أو
+  // "تكرار" لوحة المفاتيح التلقائي). بنستخدم ref مش state، لأن الـ ref
+  // بيتحدّث فورًا (sync) - عكس isLoading (state) اللي بياخد وقت لحد ما
+  // React يعمل render، وممكن الضغطة التانية "تشوفه" لسه false قبل ما
+  // يتحدّث، فتعدي من غير قصد وتبعت طلب مكرر.
+  const isSendingRef = useRef(false);
+
   const createMessage = (role: Message['role'], content: string, images?: string[]): Message => ({
     id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     role,
@@ -90,7 +97,8 @@ export function useChat(): UseChatReturn {
     }));
 
   const send = useCallback(async (text: string) => {
-    if (!text.trim() || isLoading) return;
+    if (!text.trim() || isSendingRef.current) return;
+    isSendingRef.current = true;
 
     // بنبني الـ history من الرسايل اللي موجودة *قبل* ما نضيف رسالة المستخدم
     // الحالية، عشان السؤال الحالي يتبعت لوحده في حقل message مش مكرر جوه history
@@ -106,8 +114,9 @@ export function useChat(): UseChatReturn {
       handleError(err);
     } finally {
       setIsLoading(false);
+      isSendingRef.current = false;
     }
-  }, [isLoading, appendMessage]);
+  }, [appendMessage]);
 
   const sendUserMessage = useCallback((text: string) => send(text), [send]);
   const sendVoiceMessage = useCallback((text: string) => send(text), [send]);
