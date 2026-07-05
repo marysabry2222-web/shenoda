@@ -33,7 +33,7 @@ export function ChatBubble({ message, isSpeaking = false }: ChatBubbleProps) {
         {message.images && message.images.length > 0 && (
           <div className="flex gap-2 mt-3 justify-end flex-wrap">
             {message.images.map((src, i) => (
-              
+              <a
                 key={i}
                 href={src}
                 target="_blank"
