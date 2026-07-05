@@ -9,7 +9,8 @@ interface UseChatReturn {
   error: string | null;
   sendUserMessage: (text: string) => Promise<void>;
   sendVoiceMessage: (text: string) => Promise<void>;
-  addAssistantMessage: (text: string) => void;
+  addAssistantMessage: (text: string, images?: string[]) => void;
+  addUserMessage: (text: string) => void;
   clearError: () => void;
 }
 
@@ -38,16 +39,12 @@ export function useChat(): UseChatReturn {
   // بتاعته (وده كان هيسبب إعادة إنشاء send() مع كل رسالة جديدة).
   const messagesRef = useRef<Message[]>([]);
 
-  const createMessage = (
-    role: Message['role'],
-    content: string,
-    images?: string[]
-  ): Message => ({
+  const createMessage = (role: Message['role'], content: string, images?: string[]): Message => ({
     id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     role,
     content,
-    images,
     timestamp: new Date(),
+    images,
   });
 
   const appendMessage = useCallback((message: Message) => {
@@ -59,8 +56,18 @@ export function useChat(): UseChatReturn {
   }, []);
 
   const addAssistantMessage = useCallback(
+    (text: string, images?: string[]) => {
+      appendMessage(createMessage('assistant', text, images));
+    },
+    [appendMessage]
+  );
+
+  /** بتضيف رسالة المستخدم للشات بس - من غير ما تبعت طلب /chat جديد.
+   * مستخدمة في المكالمة الفورية عشان السؤال أصلاً بيتعالج بالكامل عبر
+   * WebSocket المكالمة نفسه. */
+  const addUserMessage = useCallback(
     (text: string) => {
-      appendMessage(createMessage('assistant', text));
+      appendMessage(createMessage('user', text));
     },
     [appendMessage]
   );
@@ -88,10 +95,10 @@ export function useChat(): UseChatReturn {
     // بنبني الـ history من الرسايل اللي موجودة *قبل* ما نضيف رسالة المستخدم
     // الحالية، عشان السؤال الحالي يتبعت لوحده في حقل message مش مكرر جوه history
     const history = buildHistory();
+
     appendMessage(createMessage('user', text));
     setIsLoading(true);
     setError(null);
-
     try {
       const { answer, images } = await sendMessage(text, history);
       appendMessage(createMessage('assistant', answer, images));
@@ -104,6 +111,7 @@ export function useChat(): UseChatReturn {
 
   const sendUserMessage = useCallback((text: string) => send(text), [send]);
   const sendVoiceMessage = useCallback((text: string) => send(text), [send]);
+
   const clearError = useCallback(() => setError(null), []);
 
   return {
@@ -114,6 +122,7 @@ export function useChat(): UseChatReturn {
     sendUserMessage,
     sendVoiceMessage,
     addAssistantMessage,
+    addUserMessage,
     clearError,
   };
 }
