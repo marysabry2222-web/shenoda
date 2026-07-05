@@ -6,8 +6,8 @@ export interface Message {
   id: string;
   role: MessageRole;
   content: string;
-  images?: string[];
   timestamp: Date;
+  images?: string[]; // روابط صور اختيارية مرفقة مع الرد
 }
 
 // ─── API Types ────────────────────────────────────────────────────────────────
