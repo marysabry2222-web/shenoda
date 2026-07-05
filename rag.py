@@ -171,6 +171,10 @@ MAX_HISTORY_MESSAGES = 4
 # =========================
 # كل موضوع ممكن يترتبط بأكتر من فولدر (مثلاً "الكنيسة القديمة" بتجمع
 # صور من كذا فولدر مختلف عن شكل المبنى قديمًا)
+# =========================
+# صور مرتبطة بمواضيع/أشخاص معينين - بتتسحب عشوائي من فولدر (أو أكتر)
+# في Cloudinary لو الرد بيتكلم عن حد/حاجة منهم
+# =========================
 TOPIC_FOLDERS: dict[str, list[str]] = {
     # الآباء الكهنة
     "أبونا شنودة دوس": ["الاباء/ابونا شنودة"],
@@ -190,8 +194,7 @@ TOPIC_FOLDERS: dict[str, list[str]] = {
     # خدمات الكنيسة (عام)
     "خدمات الكنيسة": ["خدمات"],
 
-    # شكل الكنيسة/المبنى قديمًا - بتجمع من كل الفولدرات اللي فيها
-    # صور تاريخية للمبنى (قبل التعمير، من برا، الكنيسة القديمة)
+    # شكل الكنيسة/المبنى قديمًا
     "الكنيسة القديمة": [
         "صور كنيسة القديمة من 77 ل 2007",
         "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
@@ -216,15 +219,38 @@ TOPIC_FOLDERS: dict[str, list[str]] = {
 
 CLOUDINARY_SEARCH_LIMIT = 50
 IMAGES_PER_ANSWER = 2
+
+
+def _normalize_arabic(text: str) -> str:
+    """بتوحّد أشكال الحروف المختلفة اللي بتتكتب بطرق متعددة في العربي
+    (أ/إ/آ/ا، ة/ه، ى/ي) وبتشيل التشكيل، عشان المطابقة النصية
+    متتأثرش بفروق الكتابة."""
+    text = re.sub(r"[إأآا]", "ا", text)
+    text = re.sub(r"ة", "ه", text)
+    text = re.sub(r"ى", "ي", text)
+    text = re.sub(r"[\u064B-\u0652]", "", text)
+    return text
+
+
+def _match_topic(text: str) -> list[str] | None:
+    """بتدور عن أطول اسم موضوع/شخص معروف متطابق جوه نص معين،
+    بعد توحيد أشكال الحروف المتشابهة."""
+    normalized_text = _normalize_arabic(text)
+    sorted_names = sorted(TOPIC_FOLDERS.keys(), key=len, reverse=True)
+    for name in sorted_names:
+        if _normalize_arabic(name) in normalized_text:
+            return TOPIC_FOLDERS[name]
+    return None
+
+
 def _detect_topic_folders(
     question: str,
     answer: str,
     history: list[dict] | None = None,
 ) -> list[str] | None:
     """بتدور بالأولوية في السؤال نفسه الأول (أدق مصدر لمعرفة الموضوع
-    الأساسي المقصود)، وبعدين في الرد لو مفيش تطابق في السؤال (زي لو
-    السؤال عام والرد فيه التفاصيل)، وبعدين في آخر تبادل بالمحادثة
-    لو ده سؤال متابعة بضمير ('هات صورة له')."""
+    الأساسي المقصود)، وبعدين في الرد لو مفيش تطابق في السؤال، وبعدين
+    في آخر تبادل بالمحادثة لو ده سؤال متابعة بضمير ('هات صورة له')."""
     folders = _match_topic(question)
     if folders:
         return folders
@@ -265,12 +291,15 @@ def _get_random_images(folders: list[str], count: int = IMAGES_PER_ANSWER) -> li
     return [r["secure_url"] for r in all_resources[:count]]
 
 
-def _detect_priest_images(question: str, answer: str, context: str) -> list[str]:
-    folders = _detect_topic_folders(question, answer)
+def _detect_priest_images(
+    question: str,
+    answer: str,
+    history: list[dict] | None = None,
+) -> list[str]:
+    folders = _detect_topic_folders(question, answer, history)
     if not folders:
         return []
     return _get_random_images(folders)
-
 # عدد النتائج اللي بنجيبها من Cloudinary قبل ما نختار عشوائي منها -
 # رقم أعلى من الصور المعروضة فعليًا عشان يبقى فيه تنويع حقيقي بين الطلبات
 
@@ -397,7 +426,7 @@ def answer_question(question: str, history: list[dict] | None = None) -> tuple[s
         if _has_language_leak(answer):
             print("LANGUAGE LEAK DETECTED (not retrying, logged for monitoring):", answer[:150])
 
-        images = _detect_priest_images(question, answer, context)
+        images = _detect_priest_images(question, answer, history)
 
         return answer, images
 
