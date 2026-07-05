@@ -229,6 +229,8 @@ async def get_answer(question: str, history: list[HistoryItem] | None = None) ->
     )
 
     print("Answer:", answer)
+    if images:
+        print("Images:", images)
 
     return answer, images
 # =========================
@@ -333,7 +335,7 @@ async def voice(audio: UploadFile = File(...)):
         return {
             "transcript": question,
             "answer": answer_text,
-            "images": images
+            "images": images,
         }
 
     except Exception:
@@ -403,7 +405,11 @@ async def _process_utterance(
 
         await websocket.send_json({"type": "transcript", "text": question})
 
-        answer_text, _images = await get_answer(question)
+        answer_text, images = await get_answer(question)
+
+        if images:
+            await websocket.send_json({"type": "images", "images": images})
+
         await websocket.send_json({"type": "answer_text", "text": answer_text})
 
         audio_data = await _gemini_text_to_speech(answer_text)
