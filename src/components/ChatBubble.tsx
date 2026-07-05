@@ -29,24 +29,25 @@ export function ChatBubble({ message, isSpeaking = false }: ChatBubbleProps) {
       `}>
         {message.content}
 
-        {/* صور مرتبطة بالرد (لو موجودة) */}
+        {/* الصور المرفقة مع الرد - بتظهر كصندوق صورة فعلي، مش لينك */}
         {message.images && message.images.length > 0 && (
-          <div className="flex gap-2 mt-3 justify-end flex-wrap">
+          <div className={`
+            mt-3 grid gap-2
+            ${message.images.length === 1 ? 'grid-cols-1' : 'grid-cols-2'}
+          `}>
             {message.images.map((src, i) => (
-              <a
+              <img
                 key={i}
-                href={src}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block rounded-xl overflow-hidden border border-church-200 shadow-sm hover:opacity-90 transition-opacity"
-              >
-                <img
-                  src={src}
-                  alt=""
-                  className="w-28 h-28 object-cover"
-                  loading="lazy"
-                />
-              </a>
+                src={src}
+                alt=""
+                loading="lazy"
+                className="rounded-lg w-full h-auto object-cover max-h-56 border border-church-200"
+                onError={(e) => {
+                  // لو الصورة مش موجودة/الرابط عطل، نخفيها بدل ما تبين
+                  // أيقونة "صورة مكسورة" في الشات
+                  (e.currentTarget as HTMLImageElement).style.display = 'none';
+                }}
+              />
             ))}
           </div>
         )}
