@@ -2,14 +2,27 @@ import pickle
 import re
 import time
 import math
+import random
 from collections import Counter
 
 import requests
+import cloudinary
+import cloudinary.search
 from config import (
     CHUNKS_PATH,
     GROQ_API_KEY,
     GROQ_CHAT_MODEL,
     TOP_K,
+    CLOUDINARY_CLOUD_NAME,
+    CLOUDINARY_API_KEY,
+    CLOUDINARY_API_SECRET,
+)
+
+cloudinary.config(
+    cloud_name=CLOUDINARY_CLOUD_NAME,
+    api_key=CLOUDINARY_API_KEY,
+    api_secret=CLOUDINARY_API_SECRET,
+    secure=True,
 )
 
 _chunks: list[str] = []
@@ -147,6 +160,62 @@ NETWORK_ERROR_BASE_DELAY = 2  # ثواني، بيتضاعف مع كل محاول
 # RETRIEVAL_HISTORY_WINDOW اللي بيتستخدم بس لتحسين البحث عن الـ chunks)
 MAX_HISTORY_MESSAGES = 4
 
+# =========================
+# صور الآباء الكهنة - بتتسحب عشوائي من فولدر كل أب كاهن في Cloudinary
+# =========================
+# خريطة: اسم الأب زي ما بيتكتب في الأسئلة/الردود -> مسار الفولدر بالظبط
+# زي ما هو موجود في Cloudinary (مثال: "الاباء/ابونا ويصا")
+PRIEST_FOLDERS: dict[str, str] = {
+    "ابونا ويصا": "الاباء/ابونا ويصا",
+    "ابونا ابراهيم عطية": "الاباء/ابونا ابراهيم عطية",
+    "ابونا اغاثون": "الاباء/ابونا اغاثون",
+    "ابونا جرجس": "الاباء/ابونا جرجس",
+    "ابونا شنودة": "الاباء/ابونا شنودة",
+    "ابونا مينا": "الاباء/ابونا مينا",
+    # ... زودي باقي أسماء الفولدرات اللي شايفاها في Cloudinary بنفس الإملاء بالظبط
+}
+
+# عدد النتائج اللي بنجيبها من Cloudinary قبل ما نختار عشوائي منها -
+# رقم أعلى من الصور المعروضة فعليًا عشان يبقى فيه تنويع حقيقي بين الطلبات
+CLOUDINARY_SEARCH_LIMIT = 50
+IMAGES_PER_ANSWER = 2
+
+
+def _detect_priest_folder(question: str, answer: str, context: str) -> str | None:
+    """بتدور عن اسم أب كاهن معروف في السؤال أو الرد أو الـ context.
+    أول تطابق بس - عشان منجيبش صور غلط لو أكتر من اسم اتذكر في نفس الرد."""
+    combined = f"{question} {answer} {context}"
+    for name, folder in PRIEST_FOLDERS.items():
+        if name in combined:
+            return folder
+    return None
+
+
+def _get_random_images(folder: str, count: int = IMAGES_PER_ANSWER) -> list[str]:
+    """بتسحب صور عشوائية من فولدر معين في Cloudinary."""
+    try:
+        result = (
+            cloudinary.search.Search()
+            .expression(f'folder:"{folder}"')
+            .max_results(CLOUDINARY_SEARCH_LIMIT)
+            .execute()
+        )
+        resources = result.get("resources", [])
+        if not resources:
+            return []
+        random.shuffle(resources)
+        return [r["secure_url"] for r in resources[:count]]
+    except Exception as exc:
+        print("CLOUDINARY SEARCH ERROR:", exc)
+        return []
+
+
+def _detect_priest_images(question: str, answer: str, context: str) -> list[str]:
+    folder = _detect_priest_folder(question, answer, context)
+    if not folder:
+        return []
+    return _get_random_images(folder)
+
 
 def load_resources():
     global _chunks
@@ -221,7 +290,7 @@ def _call_groq(messages: list[dict]) -> requests.Response:
     )
 
 
-def answer_question(question: str, history: list[dict] | None = None) -> str:
+def answer_question(question: str, history: list[dict] | None = None) -> tuple[str, list[str]]:
     context = _retrieve_context(question, history)
     print("CONTEXT LENGTH (chars):", len(context))
     messages = _build_messages(question, context, history)
@@ -234,13 +303,13 @@ def answer_question(question: str, history: list[dict] | None = None) -> str:
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
             print(f"NETWORK ERROR (attempt {attempt + 1}/{MAX_RETRIES + 1}): {exc}")
             if is_last_attempt:
-                return FALLBACK_MESSAGE
+                return FALLBACK_MESSAGE, []
             time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
             continue
         except requests.exceptions.RequestException as exc:
             print(f"UNEXPECTED REQUEST ERROR (attempt {attempt + 1}/{MAX_RETRIES + 1}): {exc}")
             if is_last_attempt:
-                return FALLBACK_MESSAGE
+                return FALLBACK_MESSAGE, []
             time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
             continue
 
@@ -249,7 +318,7 @@ def answer_question(question: str, history: list[dict] | None = None) -> str:
 
         if resp.status_code == 429:
             if is_last_attempt:
-                return FALLBACK_MESSAGE
+                return FALLBACK_MESSAGE, []
             wait_seconds = _extract_retry_seconds(resp)
             print(f"RATE LIMITED — waiting {wait_seconds}s before retry")
             time.sleep(wait_seconds)
@@ -257,7 +326,7 @@ def answer_question(question: str, history: list[dict] | None = None) -> str:
 
         if resp.status_code >= 500:
             if is_last_attempt:
-                return FALLBACK_MESSAGE
+                return FALLBACK_MESSAGE, []
             time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
             continue
 
@@ -268,6 +337,8 @@ def answer_question(question: str, history: list[dict] | None = None) -> str:
         if _has_language_leak(answer):
             print("LANGUAGE LEAK DETECTED (not retrying, logged for monitoring):", answer[:150])
 
-        return answer
+        images = _detect_priest_images(question, answer, context)
 
-    return FALLBACK_MESSAGE
+        return answer, images
+
+    return FALLBACK_MESSAGE, []
