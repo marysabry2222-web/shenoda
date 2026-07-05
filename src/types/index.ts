@@ -6,6 +6,7 @@ export interface Message {
   id: string;
   role: MessageRole;
   content: string;
+  images?: string[];
   timestamp: Date;
 }
 
@@ -25,6 +26,7 @@ export interface ChatRequest {
 
 export interface ChatResponse {
   answer: string;
+  images?: string[];
 }
 
 export interface HealthResponse {
