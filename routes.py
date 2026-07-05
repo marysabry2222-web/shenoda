@@ -392,6 +392,8 @@ async def _process_utterance(websocket: WebSocket, pcm_audio: bytes) -> None:
         audio_data = await _gemini_text_to_speech(answer_text)
 
         print("After TTS", len(audio_data))
+        print("Audio bytes:", len(audio_data))
+        print("Sending audio start")
 
         await websocket.send_json({"type": "answer_audio_start"})
 
@@ -399,7 +401,7 @@ async def _process_utterance(websocket: WebSocket, pcm_audio: bytes) -> None:
             chunk = audio_data[i:i + GEMINI_AUDIO_CHUNK_BYTES]
             await websocket.send_bytes(chunk)
             await asyncio.sleep(0)  # نسيب فرصة لـ event loop يعالج cancel لو حصل
-
+        print("Sending audio end")
         await websocket.send_json({"type": "answer_audio_end"})
 
     except asyncio.CancelledError:
