@@ -157,58 +157,96 @@ NETWORK_ERROR_BASE_DELAY = 2
 
 MAX_HISTORY_MESSAGES = 4
 
-TOPIC_FOLDERS: dict[str, list[str]] = {
-    "أبونا شنودة دوس": ["الاباء/ابونا شنودة"],
-    "القمص إبراهيم عطية": ["الاباء/ابونا ابراهيم عطية"],
-    "أبونا إبراهيم عطية": ["الاباء/ابونا ابراهيم عطية"],
-    "القمص جرجس مرقس": ["الاباء/ابونا جرجس"],
-    "أبونا أغاثون حنا": ["الاباء/ابونا اغاثون"],
-    "أبونا مينا زكي سليمان": ["الاباء/ابونا مينا"],
-    "القمص ويصا القمص جرجس": ["الاباء/ابونا ويصا"],
-    "أبونا ويصا": ["الاباء/ابونا ويصا"],
+# كل موضوع/شخص ليه مجموعة "كلمات مفتاحية" (مش اسم كامل متصل) - لازم كل
+# الكلمات دي تكون موجودة كـ token مستقل في النص (مش شرط جنب بعض)، عشان:
+# 1) أسئلة قصيرة زي "ابونا مينا" (من غير "زكي سليمان") لسه تتطابق
+# 2) ردود فيها كلمة زيادة جوه الاسم (زي "أبونا القس مينا...") لسه تتطابق
+# 3) أسماء ملتبسة زي "جرجس" (موجودة في "جرجس مرقس" وكمان في اسم "ويصا
+#    القمص جرجس" نفسه) بنطلب أكتر من كلمة مع بعض عشان نفرّق بينهم
+TOPIC_KEYWORDS: dict[str, dict] = {
+    "شنودة دوس": {
+        "tokens": {"شنوده", "دوس"},
+        "folders": ["الاباء/ابونا شنودة"],
+    },
+    "ابراهيم عطية": {
+        "tokens": {"ابراهيم", "عطيه"},
+        "folders": ["الاباء/ابونا ابراهيم عطية"],
+    },
+    "جرجس مرقس": {
+        "tokens": {"جرجس", "مرقس"},
+        "folders": ["الاباء/ابونا جرجس"],
+    },
+    "اغاثون حنا": {
+        "tokens": {"اغاثون"},
+        "folders": ["الاباء/ابونا اغاثون"],
+    },
+    "مينا زكي سليمان": {
+        "tokens": {"مينا"},
+        "folders": ["الاباء/ابونا مينا"],
+    },
+    "يوساب حنا": {
+        "tokens": {"يوساب"},
+        "folders": ["الاباء/ابونا يوساب"],
+    },
+    "ويصا": {
+        "tokens": {"ويصا"},
+        "folders": ["الاباء/ابونا ويصا"],
+    },
+    "جميع الكهنة": {
+        "tokens": set(),
+        # بتتفعّل بس لما السؤال/الرد يتكلم عن الكهنة كمجموعة عمومًا
+        # (زي "أكتر كاهن خدم" أو "كهنة الكنيسة")، مش عن شخص واحد بعينه.
+        # لإن "tokens" فاضية، ده بيخليها دايمًا آخر أولوية (شوفي الترتيب
+        # في _match_topic) - أي تطابق باسم كاهن معين بيتغلّب عليها.
+        "any_tokens": {"كهنه", "الكهنه", "قمامصه", "القمامصه", "كاهن", "الكاهن"},
+        "folders": ["الاباء/جميع الكهنة"],
+    },
 
-    "البابا شنودة الثالث": ["زيارات البطاركة/البابا شنودة 1977"],
-    "البابا كيرلس السادس": ["زيارات البطاركة/البابا كيرلس 1960"],
-    "البابا تواضروس الثاني": ["زيارات البطاركة/البابا تواضروس 2015"],
+    "البابا شنودة الثالث": {
+        "tokens": {"البابا", "شنوده", "الثالث"},
+        "folders": ["زيارات البطاركة/البابا شنودة 1977"],
+    },
+    "البابا كيرلس": {
+        "tokens": {"كيرلس"},
+        "folders": ["زيارات البطاركة/البابا كيرلس 1960"],
+    },
+    "البابا تواضروس": {
+        "tokens": {"تواضروس"},
+        "folders": ["زيارات البطاركة/البابا تواضروس 2015"],
+    },
 
-    "خدمات الكنيسة": ["خدمات"],
+    "خدمات الكنيسة": {
+        "tokens": {"خدمات"},
+        "folders": ["خدمات"],
+    },
 
-    "الكنيسة القديمة": [
-        "صور كنيسة القديمة من 77 ل 2007",
-        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
-        "كنيسة خارجي 90",
-    ],
-    "بناء الكنيسة": [
-        "صور كنيسة القديمة من 77 ل 2007",
-        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
-        "كنيسة خارجي 90",
-    ],
-    "نشأة الكنيسة": [
-        "صور كنيسة القديمة من 77 ل 2007",
-        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
-        "كنيسة خارجي 90",
-    ],
-    "تعمير الكنيسة": [
-        "صور كنيسة القديمة من 77 ل 2007",
-        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
-        "كنيسة خارجي 90",
-    ],
-    "قصة الكنيسة": [
-        "صور كنيسة القديمة من 77 ل 2007",
-        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
-        "كنيسة خارجي 90",
-    ],
-    "تاريخ الكنيسة": [
-        "صور كنيسة القديمة من 77 ل 2007",
-        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
-        "كنيسة خارجي 90",
-    ],
-    "حكاية الكنيسة": [
-        "صور كنيسة القديمة من 77 ل 2007",
-        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
-        "كنيسة خارجي 90",
-    ],
+    "تعمير/نشأة/تاريخ الكنيسة": {
+        "tokens": set(),  # بيتفحص بمنطق تاني (أي كلمة من اللي تحت)، شوفي التعليق تحت
+        "any_tokens": {
+            "نشاه", "تعمير", "بناء", "تاسيس", "قصه", "تاريخ", "حكايه", "القديمه",
+        },
+        "folders": [
+            "صور كنيسة القديمة من 77 ل 2007",
+            "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
+            "كنيسة خارجي 90",
+        ],
+    },
 }
+
+
+def _text_tokens(text: str) -> set[str]:
+    normalized = _normalize_arabic(text)
+    return set(_word_re.findall(normalized.lower()))
+
+
+def _topic_matches(topic: dict, tokens: set[str]) -> bool:
+    required = topic.get("tokens") or set()
+    if required and required.issubset(tokens):
+        return True
+    any_tokens = topic.get("any_tokens")
+    if any_tokens and (any_tokens & tokens):
+        return True
+    return False
 
 # بدل رقم ثابت (2)، بنبعت مدى: على الأقل حاولي MIN، وبحد أقصى MAX - وده
 # بيعتمد على قد ايه صور فعليًا موجودة في الفولدر(ات) المطابقة
@@ -254,12 +292,20 @@ def _normalize_arabic(text: str) -> str:
 
 
 def _match_topic(text: str) -> list[str] | None:
-    normalized_text = _normalize_arabic(text)
-    sorted_names = sorted(TOPIC_FOLDERS.keys(), key=len, reverse=True)
-    for name in sorted_names:
-        if _normalize_arabic(name) in normalized_text:
-            return TOPIC_FOLDERS[name]
-    return None
+    tokens = _text_tokens(text)
+    # لو فيه أكتر من موضوع متطابق، نفضّل الأكثر تحديدًا (أكتر كلمات
+    # مفتاحية مطلوبة اتحققت) - عشان "جرجس مرقس" (كلمتين) يتفوّق على أي
+    # تطابق أعم لو حصل تعارض
+    matches = [
+        (len(topic.get("tokens") or []), name)
+        for name, topic in TOPIC_KEYWORDS.items()
+        if _topic_matches(topic, tokens)
+    ]
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    _, best_name = matches[0]
+    return TOPIC_KEYWORDS[best_name]["folders"]
 
 
 def _folders_key(folders: list[str]) -> tuple[str, ...]:
@@ -267,15 +313,30 @@ def _folders_key(folders: list[str]) -> tuple[str, ...]:
 
 
 def _match_dominant_topic_in_answer(answer: str) -> list[str] | None:
-    normalized_answer = _normalize_arabic(answer)
+    tokens = _text_tokens(answer)
+    token_counts = Counter(tokens)
 
     folder_scores: dict[tuple[str, ...], int] = {}
-    for name, folders in TOPIC_FOLDERS.items():
-        normalized_name = _normalize_arabic(name)
-        count = normalized_answer.count(normalized_name)
-        if count > 0:
-            key = _folders_key(folders)
-            folder_scores[key] = folder_scores.get(key, 0) + count
+    for name, topic in TOPIC_KEYWORDS.items():
+        required = topic.get("tokens") or set()
+        any_tokens = topic.get("any_tokens") or set()
+
+        if required:
+            if not required.issubset(tokens):
+                continue
+            # سكور = أقل تكرار بين الكلمات المطلوبة (يعني الاتنين لازم
+            # يتكرروا مع بعض عشان نعتبرها إشارة قوية، مش كلمة عابرة)
+            score = min(token_counts[t] for t in required)
+        elif any_tokens:
+            matched = any_tokens & tokens
+            if not matched:
+                continue
+            score = sum(token_counts[t] for t in matched)
+        else:
+            continue
+
+        key = _folders_key(topic["folders"])
+        folder_scores[key] = folder_scores.get(key, 0) + score
 
     if not folder_scores:
         return None
@@ -283,6 +344,7 @@ def _match_dominant_topic_in_answer(answer: str) -> list[str] | None:
     ranked = sorted(folder_scores.items(), key=lambda pair: pair[1], reverse=True)
     top_folders, top_score = ranked[0]
 
+    # لو فيه موضوع تاني بنفس التكرار الأعلى، الموقف غامض - منرفقش صور
     if len(ranked) > 1 and ranked[1][1] == top_score:
         return None
 
@@ -296,15 +358,17 @@ def _detect_topic_folders(
 ) -> tuple[list[str] | None, str]:
     """بترجّع (الفولدرات المطابقة أو None, مصدر المطابقة) - المصدر بس
     عشان الطباعة/التتبع (شوفي _detect_priest_images تحت) فتقدري تشوفي
-    في اللوج مصدر القرار جه منين بالظبط: من السؤال، من الرد، ولا من
-    رسالة سابقة في المحادثة."""
+    في اللوج مصدر القرار جه منين بالظبط: من السؤال، من رسالة سابقة في
+    المحادثة، ولا من الرد (آخر حل، شوفي التعليق تحت).
+
+    الأولوية اتغيّرت عشان "تركّز على السؤال أكتر من الإجابة": السؤال
+    نفسه هو المصدر الأدق دايمًا (المستخدم بيقول اللي عايزه بالظبط).
+    الرد ممكن يفصّل ويوسّع في كذا اسم وموضوع في نفس الوقت (خصوصًا في
+    أسئلة المقارنة زي "مين خدم أكتر")، فاستخدامه كمصدر أساسي كان
+    بيدّي نتايج ملخبطة أحيانًا. فبقى آخر حل بس، مش تاني حاجة نجربها."""
     folders = _match_topic(question)
     if folders:
         return folders, "question"
-
-    folders = _match_dominant_topic_in_answer(answer)
-    if folders:
-        return folders, "answer"
 
     if history:
         for item in reversed(history[-2:]):
@@ -312,6 +376,14 @@ def _detect_topic_folders(
             folders = _match_topic(content)
             if folders:
                 return folders, "history"
+
+    # آخر حل بس: لو السؤال نفسه ومفيش حاجة في المحادثة السابقة وضحت
+    # الموضوع، ندوّر في الرد - بس ده أضعف مصدر (ممكن يفصّل في أكتر من
+    # موضوع مع بعض) فبيتفحص بمنطق "الموضوع المسيطر" (تكرار)، ولو النتيجة
+    # غامضة بيرجع None بدل ما يخمّن
+    folders = _match_dominant_topic_in_answer(answer)
+    if folders:
+        return folders, "answer"
 
     return None, "no_match"
 
