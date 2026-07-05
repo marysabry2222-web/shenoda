@@ -106,24 +106,49 @@ def _retrieve_context(question: str, history: list[dict] | None = None, top_k: i
     return "\n\n---\n\n".join(selected)
 
 
-SYSTEM_PROMPT = """You are شنودة, an AI assistant for Anba Shenouda Church in Alexandria, Egypt.
+# ملحوظة: السطر ده بيستخدم SYSTEM_PROMPT_TEMPLATE.format(today=...) تحت في
+# _system_prompt() - لو استخدمتي SYSTEM_PROMPT مباشرة من غير format()،
+# النص "{today}" هيفضل زي ما هو حرفيًا في البرومبت وده باج (الموديل
+# هيشوف كلمة {today} غريبة بدل التاريخ الفعلي).
+SYSTEM_PROMPT_TEMPLATE = """You are شنودة, an AI assistant for Anba Shenouda Church in Alexandria, Egypt.
+Today's real date is: {today}
+
 - If asked who you are, say: "أنا شنودة، مساعد ذكي خاص بكنيسة الأنبا شنودة."
 - Answer ONLY in Arabic. Every word must be Arabic - not even a single foreign word or letter, including connector words.
 - Answer ONLY using facts from the provided context. Never invent information that isn't in the context.
-- EXCEPTION: if the context gives a date (e.g. an ordination date), you MAY calculate elapsed years/duration
-  by subtracting that date from today's real date above ({today}). This is a calculation on a real fact,
-  not invented information, so it is always allowed.
-- If a user asks "مدة" (duration/how long) about someone's service or ordination, treat it as asking for the
-  number of years since that date until today, using the calculation rule above - do not just restate the date.
-- If a follow-up question refers to something discussed earlier in the conversation (e.g. "كم عدد السنين" after
-  discussing an ordination date), use the conversation history to understand what is being asked, and answer using
-  the same calculation rule.
-- If the underlying fact itself (not just the date-math) is not in the context, say exactly:
+
+Duration / "مدة" questions — follow this priority order strictly:
+1. If the context EXPLICITLY states a total duration or number of years (e.g. "خدم 35 سنة كهنوت"), use that
+   exact stated number as-is. Do NOT recalculate it yourself from dates, even if you also see an ordination
+   date in the context - the explicitly stated number is always correct and takes priority over any calculation.
+2. Otherwise, calculate the duration as (end point) minus (ordination/start date), where the end point is
+   whichever of these actually applies to that person, based on the context:
+   - their death/تنيّح date, if the context says they passed away
+   - the date they left/traveled away to serve elsewhere, if the context says they left this church
+   - today's real date ({today}), only if the context gives no indication they left or passed away (i.e.
+     they are still currently serving here)
+3. If the person left, traveled away, or passed away, and the context gives NEITHER an explicit total-duration
+   number NOR any usable end date (death date / travel date), do NOT guess or calculate anything - say exactly:
+   "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا."
+4. When comparing several priests (e.g. "أكتر كاهن خدم الكنيسة"), only count each priest's time actually
+   serving THIS church specifically - if someone left to serve elsewhere for a period, don't count that time
+   away, even if they later came back (use the periods actually spent at this church only).
+
+- If a follow-up question refers to something discussed earlier in the conversation, use the conversation
+  history to understand what is being asked, and apply the same rules above.
+- If the underlying fact itself is not in the context at all, say exactly:
   "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا."
 - Never claim to be a priest or bishop.
 - Never mention embeddings, FAISS, chunks, or retrieval.
 - Be warm, respectful, and natural.
 """
+
+
+def _system_prompt() -> str:
+    from datetime import date
+    today = date.today().strftime("%Y-%m-%d")
+    return SYSTEM_PROMPT_TEMPLATE.format(today=today)
+
 
 FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، ممكن تجرب تاني بعد شوية؟"
 
@@ -168,20 +193,30 @@ TOPIC_FOLDERS: dict[str, list[str]] = {
         "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
         "كنيسة خارجي 90",
     ],
+    "قصة الكنيسة": [
+        "صور كنيسة القديمة من 77 ل 2007",
+        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
+        "كنيسة خارجي 90",
+    ],
+    "تاريخ الكنيسة": [
+        "صور كنيسة القديمة من 77 ل 2007",
+        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
+        "كنيسة خارجي 90",
+    ],
+    "حكاية الكنيسة": [
+        "صور كنيسة القديمة من 77 ل 2007",
+        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
+        "كنيسة خارجي 90",
+    ],
 }
 
-IMAGES_PER_ANSWER = 2
+# بدل رقم ثابت (2)، بنبعت مدى: على الأقل حاولي MIN، وبحد أقصى MAX - وده
+# بيعتمد على قد ايه صور فعليًا موجودة في الفولدر(ات) المطابقة
+MIN_IMAGES_PER_ANSWER = 2
+MAX_IMAGES_PER_ANSWER = 5
 
-# =========================
-# قراءة الصور من assets.json (تفريغ ثابت لكل صور Cloudinary) بدل
-# استدعاء Cloudinary Search API لايف - أسرع، وميحتاجش API key/secret
-# وقت التشغيل خالص. الملف ده لازم يكون جنب باقي ملفات الباك اند
-# (نفس مكان chunks.pkl)، وتحدّثيه بـ سكريبت التصدير كل ما تضيفي صور
-# جديدة على Cloudinary.
-# =========================
 ASSETS_JSON_PATH = "assets.json"
 
-# دلوقتي: dict {اسم المجلد: [رابط1, رابط2, ...]}
 _folder_to_images: dict[str, list[str]] = {}
 
 
@@ -202,7 +237,7 @@ def _load_assets_json():
         folder = asset.get("folder", "")
         url = asset.get("url")
         if not folder or not url:
-            continue  # نتجاهل صور samples الافتراضية (folder فاضي)
+            continue
         grouped.setdefault(folder, []).append(url)
 
     _folder_to_images = grouped
@@ -227,32 +262,68 @@ def _match_topic(text: str) -> list[str] | None:
     return None
 
 
+def _folders_key(folders: list[str]) -> tuple[str, ...]:
+    return tuple(sorted(folders))
+
+
+def _match_dominant_topic_in_answer(answer: str) -> list[str] | None:
+    normalized_answer = _normalize_arabic(answer)
+
+    folder_scores: dict[tuple[str, ...], int] = {}
+    for name, folders in TOPIC_FOLDERS.items():
+        normalized_name = _normalize_arabic(name)
+        count = normalized_answer.count(normalized_name)
+        if count > 0:
+            key = _folders_key(folders)
+            folder_scores[key] = folder_scores.get(key, 0) + count
+
+    if not folder_scores:
+        return None
+
+    ranked = sorted(folder_scores.items(), key=lambda pair: pair[1], reverse=True)
+    top_folders, top_score = ranked[0]
+
+    if len(ranked) > 1 and ranked[1][1] == top_score:
+        return None
+
+    return list(top_folders)
+
+
 def _detect_topic_folders(
     question: str,
     answer: str,
     history: list[dict] | None = None,
-) -> list[str] | None:
+) -> tuple[list[str] | None, str]:
+    """بترجّع (الفولدرات المطابقة أو None, مصدر المطابقة) - المصدر بس
+    عشان الطباعة/التتبع (شوفي _detect_priest_images تحت) فتقدري تشوفي
+    في اللوج مصدر القرار جه منين بالظبط: من السؤال، من الرد، ولا من
+    رسالة سابقة في المحادثة."""
     folders = _match_topic(question)
     if folders:
-        return folders
+        return folders, "question"
 
-    folders = _match_topic(answer)
+    folders = _match_dominant_topic_in_answer(answer)
     if folders:
-        return folders
+        return folders, "answer"
 
     if history:
         for item in reversed(history[-2:]):
             content = item.get("content", "")
             folders = _match_topic(content)
             if folders:
-                return folders
+                return folders, "history"
 
-    return None
+    return None, "no_match"
 
 
-def _get_random_images(folders: list[str], count: int = IMAGES_PER_ANSWER) -> list[str]:
-    """بتجمع روابط الصور من كل الفولدرات المطلوبة (من الكاش المحمّل من
-    assets.json)، وتسحب عشوائي منها - من غير أي استدعاء شبكة."""
+def _get_images(
+    folders: list[str],
+    min_count: int = MIN_IMAGES_PER_ANSWER,
+    max_count: int = MAX_IMAGES_PER_ANSWER,
+) -> list[str]:
+    """بتجمع روابط الصور من كل الفولدرات المطلوبة، وتسحب عشوائي منها.
+    بترجع لحد max_count لو متوفرين، أو أقل لو الفولدر فيه صور أقل من
+    كده - يعني العدد بيتغيّر حسب المتاح فعليًا، مش رقم ثابت."""
     if not _folder_to_images:
         _load_assets_json()
 
@@ -264,6 +335,7 @@ def _get_random_images(folders: list[str], count: int = IMAGES_PER_ANSWER) -> li
         return []
 
     random.shuffle(all_urls)
+    count = min(len(all_urls), max_count)
     return all_urls[:count]
 
 
@@ -272,10 +344,25 @@ def _detect_priest_images(
     answer: str,
     history: list[dict] | None = None,
 ) -> list[str]:
-    folders = _detect_topic_folders(question, answer, history)
+    folders, source = _detect_topic_folders(question, answer, history)
+
     if not folders:
+        print(f"IMAGES: مفيش تطابق موضوع (source={source}) - مفيش صور هترجع")
         return []
-    return _get_random_images(folders)
+
+    images = _get_images(folders)
+
+    # طباعة توضيحية: بتوريكي بالظبط الفولدر(ات) اللي اتحددت ومن أنهي
+    # مصدر (سؤال/رد/هيستوري)، وعدد الصور المتاحة فعليًا فيه مقابل
+    # اللي هيتبعت - عشان تقدري تتأكدي إنه "راح" للفولدر الصح في
+    # assets.json لو فيه شك في نتيجة غريبة
+    available = sum(len(_folder_to_images.get(f, [])) for f in folders)
+    print(
+        f"IMAGES: matched folders={folders} (source={source}) - "
+        f"available={available}, sending={len(images)}"
+    )
+
+    return images
 
 
 def load_resources():
@@ -314,7 +401,7 @@ def _has_language_leak(text: str) -> bool:
 
 
 def _build_messages(question: str, context: str, history: list[dict] | None) -> list[dict]:
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": _system_prompt()}]
 
     if history:
         recent_history = history[-MAX_HISTORY_MESSAGES:]
