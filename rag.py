@@ -1,6 +1,8 @@
 import pickle
 import re
 import time
+import math
+from collections import Counter
 
 import numpy as np
 import faiss
@@ -16,6 +18,97 @@ _chunks: list[str] = []
 _index: faiss.Index | None = None
 _embeddings: np.ndarray | None = None
 
+# =========================
+# Retrieval خفيف (BM25-lite) - من غير أي مكتبات إضافية
+# =========================
+# بيشتغل بس بعد ما بيقارن كلمات السؤال بكلمات كل chunk، من غير الاعتماد
+# على embeddings محفوظة مسبقًا - فمينفعش لو أعدتي التدريب وغيرتي البيانات
+# من غير ما نحتاج نعيد بناء أي فايل تاني غير embeddings.npy/chunks.pkl
+# نفسهم.
+_AR_STOPWORDS = {
+    "في", "من", "الى", "إلى", "على", "عن", "و", "أو", "ثم", "أن", "إن",
+    "هذا", "هذه", "ذلك", "تلك", "هو", "هي", "هم", "كان", "كانت", "يكون",
+    "لا", "ما", "لم", "لن", "قد", "كل", "بعض", "مع", "بين", "عند",
+    "التي", "الذي", "الذين", "له", "لها", "لهم", "به", "بها", "بهم",
+}
+
+_word_re = re.compile(r"[\w\u0600-\u06FF]+")
+
+
+def _tokenize(text: str) -> list[str]:
+    words = _word_re.findall(text.lower())
+    return [w for w in words if w not in _AR_STOPWORDS and len(w) > 1]
+
+
+_chunk_token_lists: list[list[str]] = []
+_doc_freq: Counter = Counter()
+_avg_doc_len: float = 0.0
+
+BM25_K1 = 1.5
+BM25_B = 0.75
+
+
+def _build_bm25_index():
+    """بتتحسب مرة واحدة بعد ما الـ chunks تتحمّل - بتجهز الـ term frequencies
+    والـ document frequencies اللازمين لتسجيل BM25-lite وقت كل سؤال."""
+    global _chunk_token_lists, _doc_freq, _avg_doc_len
+
+    _chunk_token_lists = [_tokenize(chunk) for chunk in _chunks]
+    _doc_freq = Counter()
+    for tokens in _chunk_token_lists:
+        for word in set(tokens):
+            _doc_freq[word] += 1
+
+    total_len = sum(len(tokens) for tokens in _chunk_token_lists)
+    _avg_doc_len = (total_len / len(_chunk_token_lists)) if _chunk_token_lists else 0.0
+
+
+def _bm25_score(query_tokens: list[str], doc_index: int) -> float:
+    doc_tokens = _chunk_token_lists[doc_index]
+    doc_len = len(doc_tokens) or 1
+    term_freq = Counter(doc_tokens)
+    n_docs = len(_chunk_token_lists) or 1
+
+    score = 0.0
+    for term in query_tokens:
+        tf = term_freq.get(term, 0)
+        if tf == 0:
+            continue
+        df = _doc_freq.get(term, 0)
+        idf = math.log(1 + (n_docs - df + 0.5) / (df + 0.5))
+        denom = tf + BM25_K1 * (1 - BM25_B + BM25_B * doc_len / (_avg_doc_len or 1))
+        score += idf * (tf * (BM25_K1 + 1)) / (denom or 1)
+
+    return score
+
+
+def _retrieve_context(question: str, top_k: int = TOP_K) -> str:
+    """
+    بترجع أقرب top_k chunks للسؤال بس (بدل كل الـ 20)، عشان نقلل حجم
+    الـ context المبعوت لـ Groq بشكل كبير (وبالتالي نتجنب rate limiting).
+    لو لأي سبب البحث مرجعش نتيجة حقيقية (كل الـ scores صفر)، بنرجع لأول
+    top_k chunks كـ fallback آمن بدل ما نرجع فاضي.
+    """
+    if not _chunk_token_lists:
+        _build_bm25_index()
+
+    query_tokens = _tokenize(question)
+
+    scores = [
+        (_bm25_score(query_tokens, i), i) for i in range(len(_chunks))
+    ]
+    scores.sort(key=lambda pair: pair[0], reverse=True)
+
+    top_indices = [i for score, i in scores[:top_k] if score > 0]
+
+    if not top_indices:
+        # مفيش تطابق كلمات حقيقي - رجّعي أول top_k chunks بدل ما ترجعي فاضي
+        top_indices = list(range(min(top_k, len(_chunks))))
+
+    selected = [_chunks[i] for i in top_indices]
+    return "\n\n---\n\n".join(selected)
+
+
 SYSTEM_PROMPT = """You are an AI assistant named شنودة for Anba Shenouda Church in Alexandria, Egypt.
 STRICT RULES:
 - Your name is شنودة. If asked who you are, say: "أنا شنودة، مساعد ذكي خاص بكنيسة الأنبا شنودة."
@@ -27,12 +120,12 @@ STRICT RULES:
 - Be warm, respectful, and natural.
 """
 
+# رسالة بديلة تتقال للمستخدم لو كل محاولات الاتصال بـ Groq فشلت
 FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، ممكن تجرب تاني بعد شوية؟"
 
 MAX_RETRIES = 3
-NETWORK_ERROR_BASE_DELAY = 2
+NETWORK_ERROR_BASE_DELAY = 2  # ثواني، بيتضاعف مع كل محاولة (2, 4, 8)
 
-# أقصى عدد رسائل سابقة (من المستخدم + المساعد) هنبعتها كـ context للموديل
 MAX_HISTORY_MESSAGES = 10
 
 
@@ -48,12 +141,10 @@ def load_resources():
     faiss.normalize_L2(_embeddings)
     _index = faiss.IndexFlatIP(_embeddings.shape[1])
     _index.add(_embeddings)
+
+    _build_bm25_index()
+
     print(f"✅ Ready — {len(_chunks)} chunks")
-
-
-def _retrieve_context(question: str) -> str:
-    """Return all chunks as context — dataset is small enough (20 chunks)."""
-    return "\n\n---\n\n".join(_chunks)
 
 
 def _extract_retry_seconds(response: requests.Response, default: float = 5.0) -> float:
@@ -69,14 +160,9 @@ def _extract_retry_seconds(response: requests.Response, default: float = 5.0) ->
 
 
 def _build_messages(question: str, context: str, history: list[dict] | None) -> list[dict]:
-    """
-    بيبني الـ messages array اللي هتتبعت لـ Groq:
-    system prompt → آخر رسائل من المحادثة (لو موجودة) → السؤال الحالي مع الـ context
-    """
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     if history:
-        # ناخد بس آخر MAX_HISTORY_MESSAGES رسالة عشان منبعتش سياق كبير أوي
         recent_history = history[-MAX_HISTORY_MESSAGES:]
         for item in recent_history:
             role = item.get("role")
@@ -113,6 +199,7 @@ def _call_groq(messages: list[dict]) -> requests.Response:
 
 def answer_question(question: str, history: list[dict] | None = None) -> str:
     context = _retrieve_context(question)
+    print("CONTEXT LENGTH (chars):", len(context))
     messages = _build_messages(question, context, history)
 
     for attempt in range(MAX_RETRIES + 1):
