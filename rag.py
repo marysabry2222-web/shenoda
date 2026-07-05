@@ -1,33 +1,121 @@
 import pickle
 import re
 import time
+import math
+from collections import Counter
 
 import requests
 from config import (
     CHUNKS_PATH,
     GROQ_API_KEY,
     GROQ_CHAT_MODEL,
+    TOP_K,
 )
 
 _chunks: list[str] = []
 
+# =========================
+# Retrieval خفيف (BM25-lite) - "واعي بالسياق"
+# =========================
+# الفرق عن BM25 العادي: بدل ما نبحث بكلمات السؤال الحالي بس، بندمج
+# كلمات آخر رسايل المحادثة (history) مع السؤال قبل التسجيل. كده أسئلة
+# متابعة زي "طب عرفني عنه" أو "وهو ده مين" (من غير كلمات مفتاحية واضحة)
+# لسه بتلاقي الـ chunk الصح، لأن كلمات الرسالة اللي فاتت (زي اسم
+# الشخص) بتفضل موجودة في البحث.
+_AR_STOPWORDS = {
+    "في", "من", "الى", "إلى", "على", "عن", "و", "أو", "ثم", "أن", "إن",
+    "هذا", "هذه", "ذلك", "تلك", "هو", "هي", "هم", "كان", "كانت", "يكون",
+    "لا", "ما", "لم", "لن", "قد", "كل", "بعض", "مع", "بين", "عند",
+    "التي", "الذي", "الذين", "له", "لها", "لهم", "به", "بها", "بهم",
+}
 
-def _retrieve_context(question: str) -> str:
-    """بترجع كل الـ chunks كاملة دايمًا - مفيش أي بحث/فلترة خالص.
-    لو عايزة تقللي حجم الـ context تاني في المستقبل، هنا المكان اللي
-    نضيف فيه أي منطق retrieval (BM25 أو embeddings) بدل ما نبعت كل حاجة."""
-    return "\n\n---\n\n".join(_chunks)
+_word_re = re.compile(r"[\w\u0600-\u06FF]+")
 
 
-def _embed_question(question: str):
-    """
-    Placeholder لخطوة الـ embedding - مش مفعّلة حاليًا (الرد بيبعت كل
-    الـ chunks كاملة من غير أي بحث). سيبناها هنا عشان لو حبينا نرجع
-    نستخدم embeddings حقيقية للـ retrieval مستقبلًا، مكانها جاهز.
+def _tokenize(text: str) -> list[str]:
+    words = _word_re.findall(text.lower())
+    return [w for w in words if w not in _AR_STOPWORDS and len(w) > 1]
 
-    Return None يعني: استخدمي الـ context الكامل (السلوك الحالي).
-    """
-    return None
+
+_chunk_token_lists: list[list[str]] = []
+_doc_freq: Counter = Counter()
+_avg_doc_len: float = 0.0
+
+BM25_K1 = 1.5
+BM25_B = 0.75
+
+# قد إيه رسايل من الهيستوري بتتضاف لكلمات البحث (غير الـ history اللي
+# بيتبعت فعليًا كسياق محادثة لـ Groq - ده منفصل، شوفي MAX_HISTORY_MESSAGES)
+RETRIEVAL_HISTORY_WINDOW = 2
+
+
+def _build_bm25_index():
+    global _chunk_token_lists, _doc_freq, _avg_doc_len
+
+    _chunk_token_lists = [_tokenize(chunk) for chunk in _chunks]
+    _doc_freq = Counter()
+    for tokens in _chunk_token_lists:
+        for word in set(tokens):
+            _doc_freq[word] += 1
+
+    total_len = sum(len(tokens) for tokens in _chunk_token_lists)
+    _avg_doc_len = (total_len / len(_chunk_token_lists)) if _chunk_token_lists else 0.0
+
+
+def _bm25_score(query_tokens: list[str], doc_index: int) -> float:
+    doc_tokens = _chunk_token_lists[doc_index]
+    doc_len = len(doc_tokens) or 1
+    term_freq = Counter(doc_tokens)
+    n_docs = len(_chunk_token_lists) or 1
+
+    score = 0.0
+    for term in query_tokens:
+        tf = term_freq.get(term, 0)
+        if tf == 0:
+            continue
+        df = _doc_freq.get(term, 0)
+        idf = math.log(1 + (n_docs - df + 0.5) / (df + 0.5))
+        denom = tf + BM25_K1 * (1 - BM25_B + BM25_B * doc_len / (_avg_doc_len or 1))
+        score += idf * (tf * (BM25_K1 + 1)) / (denom or 1)
+
+    return score
+
+
+def _build_retrieval_query(question: str, history: list[dict] | None) -> str:
+    """بتضيف كلمات آخر رسايل المحادثة لكلمات السؤال، عشان أسئلة المتابعة
+    (من غير كلمات مفتاحية واضحة) لسه تلاقي الـ chunk الصح."""
+    parts = [question]
+    if history:
+        recent = history[-RETRIEVAL_HISTORY_WINDOW:]
+        for item in recent:
+            content = item.get("content")
+            if content:
+                parts.append(content)
+    return " ".join(parts)
+
+
+def _retrieve_context(question: str, history: list[dict] | None = None, top_k: int = TOP_K) -> str:
+    """بترجع أقرب top_k chunks بس (مش كل الـ 11) - بحث واعي بسياق
+    المحادثة، مش بس بكلمات السؤال الحالي لوحدها."""
+    if not _chunk_token_lists:
+        _build_bm25_index()
+
+    retrieval_query = _build_retrieval_query(question, history)
+    query_tokens = _tokenize(retrieval_query)
+
+    scores = [
+        (_bm25_score(query_tokens, i), i) for i in range(len(_chunks))
+    ]
+    scores.sort(key=lambda pair: pair[0], reverse=True)
+
+    top_indices = [i for score, i in scores[:top_k] if score > 0]
+
+    if not top_indices:
+        # مفيش تطابق كلمات حقيقي - رجّعي أول top_k chunks بدل ما ترجعي فاضي
+        top_indices = list(range(min(top_k, len(_chunks))))
+
+    selected = [_chunks[i] for i in top_indices]
+    return "\n\n---\n\n".join(selected)
 
 
 SYSTEM_PROMPT = """You are شنودة, an AI assistant for Anba Shenouda Church in Alexandria, Egypt.
@@ -47,17 +135,19 @@ FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، مم
 MAX_RETRIES = 3
 NETWORK_ERROR_BASE_DELAY = 2  # ثواني، بيتضاعف مع كل محاولة (2, 4, 8)
 
-MAX_HISTORY_MESSAGES = 2
+# عدد رسايل الهيستوري اللي بتتبعت كسياق محادثة كامل لـ Groq (منفصل عن
+# RETRIEVAL_HISTORY_WINDOW اللي بيتستخدم بس لتحسين البحث عن الـ chunks)
+MAX_HISTORY_MESSAGES = 4
 
 
 def load_resources():
-    """بتحمّل chunks.pkl بس. مفيش أي فهرسة أو بناء index - بنبعت كل
-    الـ chunks زي ما هي مع كل سؤال."""
     global _chunks
     print("Loading chunks...")
     with open(CHUNKS_PATH, "rb") as f:
         _chunks = pickle.load(f)
     _chunks = [c["text"] if isinstance(c, dict) else c for c in _chunks]
+
+    _build_bm25_index()
 
     print(f"✅ Ready — {len(_chunks)} chunks")
 
@@ -74,8 +164,6 @@ def _extract_retry_seconds(response: requests.Response, default: float = 5.0) ->
     return default
 
 
-# لو نسبة الحروف اللاتينية في الرد عالية، غالبًا فيه "تسرب لغوي" (كلمة
-# من لغة تانية اندسّت في النص) - ظاهرة معروفة مع الموديلات الصغيرة.
 _LATIN_RE = re.compile(r"[a-zA-Z]")
 
 
@@ -84,8 +172,6 @@ def _has_language_leak(text: str) -> bool:
     if not letters:
         return False
     latin_count = len(_LATIN_RE.findall(text))
-    # نسمح بنسبة صغيرة (أسماء أو مصطلحات إنجليزية مقصودة أحيانًا)، لكن
-    # أي نسبة أعلى من كده تقريبًا مؤكد إنها تسرب لغوي غير مقصود
     return latin_count > 0 and (latin_count / len(letters)) > 0.05
 
 
@@ -128,7 +214,7 @@ def _call_groq(messages: list[dict]) -> requests.Response:
 
 
 def answer_question(question: str, history: list[dict] | None = None) -> str:
-    context = _retrieve_context(question)
+    context = _retrieve_context(question, history)
     print("CONTEXT LENGTH (chars):", len(context))
     messages = _build_messages(question, context, history)
 
@@ -171,10 +257,6 @@ def answer_question(question: str, history: list[dict] | None = None) -> str:
 
         answer = resp.json()["choices"][0]["message"]["content"].strip()
 
-        # بس تسجيل في اللوج للمراقبة - من غير أي retry أو تأخير إضافي،
-        # لأن المكالمة الصوتية حساسة جدًا للـ latency. التعليمة المقوّاة
-        # في SYSTEM_PROMPT هي خط الدفاع الأساسي. لو الظاهرة استمرت كتير
-        # في اللوج بعد كده، وقتها نفكر في حل تاني (موديل أكبر مثلاً).
         if _has_language_leak(answer):
             print("LANGUAGE LEAK DETECTED (not retrying, logged for monitoring):", answer[:150])
 
