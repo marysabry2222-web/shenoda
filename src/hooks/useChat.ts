@@ -38,10 +38,15 @@ export function useChat(): UseChatReturn {
   // بتاعته (وده كان هيسبب إعادة إنشاء send() مع كل رسالة جديدة).
   const messagesRef = useRef<Message[]>([]);
 
-  const createMessage = (role: Message['role'], content: string): Message => ({
+  const createMessage = (
+    role: Message['role'],
+    content: string,
+    images?: string[]
+  ): Message => ({
     id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     role,
     content,
+    images,
     timestamp: new Date(),
   });
 
@@ -83,13 +88,13 @@ export function useChat(): UseChatReturn {
     // بنبني الـ history من الرسايل اللي موجودة *قبل* ما نضيف رسالة المستخدم
     // الحالية، عشان السؤال الحالي يتبعت لوحده في حقل message مش مكرر جوه history
     const history = buildHistory();
-
     appendMessage(createMessage('user', text));
     setIsLoading(true);
     setError(null);
+
     try {
-      const answer = await sendMessage(text, history);
-      appendMessage(createMessage('assistant', answer));
+      const { answer, images } = await sendMessage(text, history);
+      appendMessage(createMessage('assistant', answer, images));
     } catch (err: unknown) {
       handleError(err);
     } finally {
@@ -99,7 +104,6 @@ export function useChat(): UseChatReturn {
 
   const sendUserMessage = useCallback((text: string) => send(text), [send]);
   const sendVoiceMessage = useCallback((text: string) => send(text), [send]);
-
   const clearError = useCallback(() => setError(null), []);
 
   return {
