@@ -24,12 +24,10 @@ function delay(ms: number) {
  */
 function isRetryableError(err: unknown): boolean {
   if (!(err instanceof AxiosError)) return false;
-
   const status = err.response?.status;
   if (status !== undefined) {
     return RETRYABLE_STATUS.has(status);
   }
-
   // مفيش response خالص = مشكلة شبكة (ECONNRESET / Network Error) أو timeout
   return err.code === 'ECONNABORTED' || err.message === 'Network Error' || !err.response;
 }
@@ -45,36 +43,34 @@ async function withRetry<T>(
   baseDelayMs = 3000
 ): Promise<T> {
   let lastError: unknown;
-
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (err) {
       lastError = err;
-
       if (!isRetryableError(err) || attempt === maxRetries) {
         throw err;
       }
-
       // backoff بسيط: 3s ثم 6s ثم 12s...
       await delay(baseDelayMs * Math.pow(2, attempt));
     }
   }
-
   throw lastError;
 }
 
 export async function sendMessage(
   message: string,
   history: HistoryItem[] = []
-): Promise<string> {
+): Promise<{ answer: string; images: string[] }> {
   const payload: ChatRequest = { message, history };
-
   return withRetry(async () => {
     const response = await api.post<ChatResponse>('/chat', payload, {
       timeout: 90_000, // أطول من الـ default عشان تستحمل retry الباك إند لو حصل
     });
-    return response.data.answer;
+    return {
+      answer: response.data.answer,
+      images: response.data.images ?? [],
+    };
   });
 }
 
@@ -90,10 +86,9 @@ export async function textToSpeech(text: string): Promise<string | null> {
 
 export async function sendVoice(
   audioBlob: Blob
-): Promise<{ transcript: string; answer: string }> {
+): Promise<{ transcript: string; answer: string; images: string[] }> {
   const formData = new FormData();
   formData.append('audio', audioBlob, 'audio.webm');
-
   return withRetry(async () => {
     const response = await api.post('/voice', formData, {
       headers: {
@@ -101,7 +96,11 @@ export async function sendVoice(
       },
       timeout: 90_000,
     });
-    return response.data;
+    return {
+      transcript: response.data.transcript,
+      answer: response.data.answer,
+      images: response.data.images ?? [],
+    };
   });
 }
 
