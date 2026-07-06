@@ -405,7 +405,7 @@ async def voice(audio: UploadFile = File(...)):
         # ملحوظة: /voice لسه مبيستقبلش history من الفرونت إند حاليًا
         # (sendVoice في api.ts لسه بيبعت الصوت بس). ممكن نضيفها لاحقًا
         # لو حابين محادثات الصوت تبقى فيها سياق زي الشات النصي.
-        answer_text, images = await get_answer(question)
+        answer_text, images , audio_url= await get_answer(question)
 
         return {
             "transcript": question,
@@ -483,7 +483,7 @@ async def _process_utterance(
 
         await websocket.send_json({"type": "transcript", "text": question})
 
-        answer_text, images = await get_answer(question)
+        answer_text, images , audio_url = await get_answer(question)
 
         if images:
             await websocket.send_json({"type": "images", "images": images})
