@@ -13,6 +13,8 @@ from config import (
     GROQ_API_KEY,
     TOP_K,
     CEREBRAS_API_KEY,
+    GROQ_SECONDARY_MODEL,
+    GROQ_TERTIARY_MODEL,
 )
 
 _chunks: list[str] = []
@@ -482,23 +484,25 @@ def _build_messages(question: str, context: str, history: list[dict] | None) -> 
 
 
 # =========================
-# مزوّدين مختلفين للـ LLM: Cerebras (أساسي) و Groq (fallback)
+# مزوّدين مختلفين للـ LLM: Cerebras (أساسي) و Groq (fallback على مستويين)
 # =========================
 # ليه Cerebras أساسي: حد التوكنز في الدقيقة (TPM) عندهم أعلى بكتير من
 # Groq (30,000 مقابل 6,000)، فبيتحمّل الـ context الكبير اللي بنبعته
 # من غير ما يضرب rate limit كل شوية. في المقابل، حد الطلبات في الدقيقة
 # (RPM) عندهم أقل (5 بس) - فلو حصل ضغط طلبات فجأة (كذا مستخدم في نفس
 # اللحظة)، ده هو اللي المفروض يضرب الحد مش التوكنز.
+#
+# ترتيب الـ fallback:
+#   1) Cerebras gpt-oss-120b (أساسي)
+#   2) Groq gpt-oss-20b (نفس عائلة gpt-oss - أقرب أسلوب لل-120b)
+#   3) Groq llama-3.3-70b (حل أخير - أسلوب مختلف شوية عن gpt-oss)
 CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
 CEREBRAS_CHAT_MODEL = "gpt-oss-120b"
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-# fallback لو Cerebras فشل في كل محاولاته (rate limit مستمر أو مشكلة
-# تانية) - حل أخير قبل ما نرجع رسالة الفولباك النهائية للمستخدم.
-GROQ_FALLBACK_MODEL = "llama-3.3-70b-versatile"
 
 MAX_RETRIES_PRIMARY = MAX_RETRIES
-# عدد محاولات الـ fallback - أقل من الأساسي لأنه أصلاً حل أخير، مش
+# عدد محاولات الـ fallback - أقل من الأساسي لأنه أصلاً حل احتياطي، مش
 # عايزين نضيّع وقت طويل عليه لو هو كمان فاشل
 FALLBACK_MAX_RETRIES = 1
 
@@ -532,6 +536,9 @@ def _call_chat_completions(
         # Cerebras) - نضيفها بس لو الطلب فعليًا رايح لـ Groq
         if "groq.com" in url:
             payload["reasoning_format"] = "hidden"
+    elif "llama" in model_lower:
+        # Llama مش موديل reasoning - مبنبعتلوش أي reasoning_* خالص
+        pass
 
     return requests.post(
         url,
@@ -556,7 +563,7 @@ def _attempt_completion(
 
     بترجع الـ response عند النجاح، أو None لو كل المحاولات المسموحة
     (max_retries + 1) فشلت - عشان اللي بينده الدالة (answer_question)
-    يقرر يجرب مزوّد تاني (fallback) أو يرجع رسالة الفولباك النهائية.
+    يقرر يجرب مزوّد/موديل تاني (fallback) أو يرجع رسالة الفولباك النهائية.
 
     ملحوظة: أخطاء 400 (زي طلب مكوّن غلط) بتترفع فورًا من غير أي retry -
     إعادة نفس الطلب الغلط هتفشل تاني بنفس الشكل، فمفيش فايدة من الانتظار."""
@@ -608,8 +615,8 @@ def answer_question(question: str, history: list[dict] | None = None) -> tuple[s
     print("CONTEXT LENGTH (chars):", len(context))
     messages = _build_messages(question, context, history)
 
-    # المحاولة الأساسية: Cerebras (gpt-oss-120b) بكل محاولات إعادة
-    # المحاولة العادية (MAX_RETRIES_PRIMARY)
+    # المستوى 1: Cerebras (gpt-oss-120b) - أساسي، بكل محاولات الـ retry
+    # العادية (MAX_RETRIES_PRIMARY)
     try:
         resp = _attempt_completion(
             messages, CEREBRAS_URL, CEREBRAS_API_KEY, CEREBRAS_CHAT_MODEL, MAX_RETRIES_PRIMARY
@@ -618,22 +625,30 @@ def answer_question(question: str, history: list[dict] | None = None) -> tuple[s
         print(f"[{CEREBRAS_CHAT_MODEL}] Bad request (not retrying): {exc}")
         resp = None
 
-    # لو فشلت كل محاولات Cerebras (rate limit مستمر، أو bad request، أو
-    # أي مشكلة تانية)، نجرب حل أخير: Groq (Llama)
+    # المستوى 2: Groq gpt-oss-20b - نفس عائلة الموديل الأساسي، فبيحافظ
+    # على نفس أسلوب الإجابة تقريبًا أكتر من Llama
     if resp is None:
-        print(
-            f"{CEREBRAS_CHAT_MODEL} (Cerebras) failed - "
-            f"trying fallback model {GROQ_FALLBACK_MODEL} (Groq)"
-        )
+        print(f"{CEREBRAS_CHAT_MODEL} (Cerebras) failed - trying {GROQ_SECONDARY_MODEL} (Groq)")
         try:
             resp = _attempt_completion(
-                messages, GROQ_URL, GROQ_API_KEY, GROQ_FALLBACK_MODEL, FALLBACK_MAX_RETRIES
+                messages, GROQ_URL, GROQ_API_KEY, GROQ_SECONDARY_MODEL, FALLBACK_MAX_RETRIES
             )
         except requests.exceptions.HTTPError as exc:
-            print(f"[{GROQ_FALLBACK_MODEL}] Bad request (not retrying): {exc}")
+            print(f"[{GROQ_SECONDARY_MODEL}] Bad request (not retrying): {exc}")
             resp = None
 
-    # لو الاتنين فشلوا، مفيش حاجة تانية نعملها - رسالة الفولباك النهائية
+    # المستوى 3: Groq llama-3.3-70b - حل أخير قبل رسالة الفولباك النهائية
+    if resp is None:
+        print(f"{GROQ_SECONDARY_MODEL} failed - trying {GROQ_TERTIARY_MODEL} (Groq)")
+        try:
+            resp = _attempt_completion(
+                messages, GROQ_URL, GROQ_API_KEY, GROQ_TERTIARY_MODEL, FALLBACK_MAX_RETRIES
+            )
+        except requests.exceptions.HTTPError as exc:
+            print(f"[{GROQ_TERTIARY_MODEL}] Bad request (not retrying): {exc}")
+            resp = None
+
+    # لو الثلاثة فشلوا، مفيش حاجة تانية نعملها - رسالة الفولباك النهائية
     if resp is None:
         return FALLBACK_MESSAGE, []
 
