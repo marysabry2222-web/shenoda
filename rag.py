@@ -493,7 +493,7 @@ def _call_groq(messages: list[dict]) -> requests.Response:
             "temperature": 0.2,
             "max_tokens": 500,
             "messages": messages,
-            "reasoning_format": "hidden",
+            "reasoning_format": "none",
         },
         timeout=60,
     )
