@@ -3,20 +3,39 @@ import re
 import time
 import math
 import random
-import json
-from pathlib import Path
 from collections import Counter
+from datetime import date
 
 import requests
+import cloudinary
+import cloudinary.search
 from config import (
     CHUNKS_PATH,
     GROQ_API_KEY,
     GROQ_CHAT_MODEL,
     TOP_K,
+    CLOUDINARY_CLOUD_NAME,
+    CLOUDINARY_API_KEY,
+    CLOUDINARY_API_SECRET,
+)
+
+cloudinary.config(
+    cloud_name=CLOUDINARY_CLOUD_NAME,
+    api_key=CLOUDINARY_API_KEY,
+    api_secret=CLOUDINARY_API_SECRET,
+    secure=True,
 )
 
 _chunks: list[str] = []
 
+# =========================
+# Retrieval خفيف (BM25-lite) - "واعي بالسياق"
+# =========================
+# الفرق عن BM25 العادي: بدل ما نبحث بكلمات السؤال الحالي بس، بندمج
+# كلمات آخر رسايل المحادثة (history) مع السؤال قبل التسجيل. كده أسئلة
+# متابعة زي "طب عرفني عنه" أو "وهو ده مين" (من غير كلمات مفتاحية واضحة)
+# لسه بتلاقي الـ chunk الصح، لأن كلمات الرسالة اللي فاتت (زي اسم
+# الشخص) بتفضل موجودة في البحث.
 _AR_STOPWORDS = {
     "في", "من", "الى", "إلى", "على", "عن", "و", "أو", "ثم", "أن", "إن",
     "هذا", "هذه", "ذلك", "تلك", "هو", "هي", "هم", "كان", "كانت", "يكون",
@@ -39,6 +58,8 @@ _avg_doc_len: float = 0.0
 BM25_K1 = 1.5
 BM25_B = 0.75
 
+# قد إيه رسايل من الهيستوري بتتضاف لكلمات البحث (غير الـ history اللي
+# بيتبعت فعليًا كسياق محادثة لـ Groq - ده منفصل، شوفي MAX_HISTORY_MESSAGES)
 RETRIEVAL_HISTORY_WINDOW = 2
 
 
@@ -75,6 +96,8 @@ def _bm25_score(query_tokens: list[str], doc_index: int) -> float:
 
 
 def _build_retrieval_query(question: str, history: list[dict] | None) -> str:
+    """بتضيف كلمات آخر رسايل المحادثة لكلمات السؤال، عشان أسئلة المتابعة
+    (من غير كلمات مفتاحية واضحة) لسه تلاقي الـ chunk الصح."""
     parts = [question]
     if history:
         recent = history[-RETRIEVAL_HISTORY_WINDOW:]
@@ -86,6 +109,8 @@ def _build_retrieval_query(question: str, history: list[dict] | None) -> str:
 
 
 def _retrieve_context(question: str, history: list[dict] | None = None, top_k: int = TOP_K) -> str:
+    """بترجع أقرب top_k chunks بس (مش كل الـ 11) - بحث واعي بسياق
+    المحادثة، مش بس بكلمات السؤال الحالي لوحدها."""
     if not _chunk_token_lists:
         _build_bm25_index()
 
@@ -100,353 +125,135 @@ def _retrieve_context(question: str, history: list[dict] | None = None, top_k: i
     top_indices = [i for score, i in scores[:top_k] if score > 0]
 
     if not top_indices:
+        # مفيش تطابق كلمات حقيقي - رجّعي أول top_k chunks بدل ما ترجعي فاضي
         top_indices = list(range(min(top_k, len(_chunks))))
 
     selected = [_chunks[i] for i in top_indices]
     return "\n\n---\n\n".join(selected)
 
 
-# ملحوظة: السطر ده بيستخدم SYSTEM_PROMPT_TEMPLATE.format(today=...) تحت في
-# _system_prompt() - لو استخدمتي SYSTEM_PROMPT مباشرة من غير format()،
-# النص "{today}" هيفضل زي ما هو حرفيًا في البرومبت وده باج (الموديل
-# هيشوف كلمة {today} غريبة بدل التاريخ الفعلي).
-SYSTEM_PROMPT_TEMPLATE = """You are شنودة, an AI assistant for Anba Shenouda Church in Alexandria, Egypt.
-Today's real date is: {today}
+# {today} بيتستبدل فعليًا بتاريخ اليوم في _build_messages وقت كل طلب -
+# مش نص ثابت، عشان حساب "مدة الخدمة" يبقى صح دايمًا
+SYSTEM_PROMPT_TEMPLATE = """You are شنودة, AI assistant for Anba Shenouda Church, Alexandria. Today: {today}
+- Identity: "أنا شنودة، مساعد ذكي خاص بكنيسة الأنبا شنودة."
+- Arabic only - every word, no foreign letters, incl. connectors.
+- Only context facts, never invent.
 
-- If asked who you are, say: "أنا شنودة، مساعد ذكي خاص بكنيسة الأنبا شنودة."
-- Answer ONLY in Arabic. Every word must be Arabic - not even a single foreign word or letter, including connector words.
-- Answer ONLY using facts from the provided context. Never invent information that isn't in the context.
+Duration questions:
+1. Explicit duration stated in context → use as-is, don't recompute from dates.
+2. Else: end (death/تنيّح, or departure if left) minus start date; use {today} as end only if still serving here.
+3. No explicit duration AND no usable end date for someone who left/died → say: "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا."
+4. Comparisons (e.g. longest-serving): count only time actually spent at THIS church.
 
-Duration / "مدة" questions — follow this priority order strictly:
-1. If the context EXPLICITLY states a total duration or number of years (e.g. "خدم 35 سنة كهنوت"), use that
-   exact stated number as-is. Do NOT recalculate it yourself from dates, even if you also see an ordination
-   date in the context - the explicitly stated number is always correct and takes priority over any calculation.
-2. Otherwise, calculate the duration as (end point) minus (ordination/start date), where the end point is
-   whichever of these actually applies to that person, based on the context:
-   - their death/تنيّح date, if the context says they passed away
-   - the date they left/traveled away to serve elsewhere, if the context says they left this church
-   - today's real date ({today}), only if the context gives no indication they left or passed away (i.e.
-     they are still currently serving here)
-3. If the person left, traveled away, or passed away, and the context gives NEITHER an explicit total-duration
-   number NOR any usable end date (death date / travel date), do NOT guess or calculate anything - say exactly:
-   "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا."
-4. When comparing several priests (e.g. "أكتر كاهن خدم الكنيسة"), only count each priest's time actually
-   serving THIS church specifically - if someone left to serve elsewhere for a period, don't count that time
-   away, even if they later came back (use the periods actually spent at this church only).
-
-- If a follow-up question refers to something discussed earlier in the conversation, use the conversation
-  history to understand what is being asked, and apply the same rules above.
-- If the underlying fact itself is not in the context at all, say exactly:
-  "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا."
-- Never claim to be a priest or bishop.
-- Never mention embeddings, FAISS, chunks, or retrieval.
-- Be warm, respectful, and natural.
+- Use conversation history to resolve follow-ups, then apply the same rules.
+- Fact missing from context entirely → same refusal as rule 3.
+- Never claim to be a priest/bishop. Never mention embeddings/FAISS/chunks/retrieval.
+- Warm, respectful, natural tone.
 """
 
-
-def _system_prompt() -> str:
-    from datetime import date
-    today = date.today().strftime("%Y-%m-%d")
-    return SYSTEM_PROMPT_TEMPLATE.format(today=today)
-
-
+# رسالة بديلة تتقال للمستخدم لو كل محاولات الاتصال بـ Groq فشلت
 FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، ممكن تجرب تاني بعد شوية؟"
 
 MAX_RETRIES = 3
-NETWORK_ERROR_BASE_DELAY = 2
+NETWORK_ERROR_BASE_DELAY = 2  # ثواني، بيتضاعف مع كل محاولة (2, 4, 8)
 
+# عدد رسايل الهيستوري اللي بتتبعت كسياق محادثة كامل لـ Groq (منفصل عن
+# RETRIEVAL_HISTORY_WINDOW اللي بيتستخدم بس لتحسين البحث عن الـ chunks)
 MAX_HISTORY_MESSAGES = 4
 
-# كل موضوع/شخص ليه مجموعة "كلمات مفتاحية" (مش اسم كامل متصل) - لازم كل
-# الكلمات دي تكون موجودة كـ token مستقل في النص (مش شرط جنب بعض)، عشان:
-# 1) أسئلة قصيرة زي "ابونا مينا" (من غير "زكي سليمان") لسه تتطابق
-# 2) ردود فيها كلمة زيادة جوه الاسم (زي "أبونا القس مينا...") لسه تتطابق
-# 3) أسماء ملتبسة زي "جرجس" (موجودة في "جرجس مرقس" وكمان في اسم "ويصا
-#    القمص جرجس" نفسه) بنطلب أكتر من كلمة مع بعض عشان نفرّق بينهم
-TOPIC_KEYWORDS: dict[str, dict] = {
-    "شنودة دوس": {
-        "tokens": {"شنوده", "دوس"},
-        "folders": ["الاباء/ابونا شنودة"],
-    },
-    "ابراهيم عطية": {
-        "tokens": {"ابراهيم", "عطيه"},
-        "folders": ["الاباء/ابونا ابراهيم عطية"],
-    },
-    "جرجس مرقس": {
-        "tokens": {"جرجس", "مرقس"},
-        "folders": ["الاباء/ابونا جرجس"],
-    },
-    "اغاثون حنا": {
-        "tokens": {"اغاثون"},
-        "folders": ["الاباء/ابونا اغاثون"],
-    },
-    "مينا زكي سليمان": {
-        "tokens": {"مينا"},
-        "folders": ["الاباء/ابونا مينا"],
-    },
-    "يوساب حنا": {
-        "tokens": {"يوساب"},
-        "folders": ["الاباء/ابونا يوساب"],
-    },
-    "ويصا": {
-        "tokens": {"ويصا"},
-        "folders": ["الاباء/ابونا ويصا"],
-    },
-    "جميع الكهنة": {
-        "tokens": set(),
-        # بتتفعّل بس لما السؤال/الرد يتكلم عن الكهنة كمجموعة عمومًا
-        # (زي "أكتر كاهن خدم" أو "كهنة الكنيسة")، مش عن شخص واحد بعينه.
-        # لإن "tokens" فاضية، ده بيخليها دايمًا آخر أولوية (شوفي الترتيب
-        # في _match_topic) - أي تطابق باسم كاهن معين بيتغلّب عليها.
-        "any_tokens": {"كهنه", "الكهنه", "قمامصه", "القمامصه", "كاهن", "الكاهن"},
-        "folders": ["الاباء/جميع الكهنة"],
-    },
+# =========================
+# صور مرتبطة بمواضيع/أشخاص معينين - بتتسحب عشوائي من فولدر (أو أكتر)
+# في Cloudinary لو الرد بيتكلم عن حد/حاجة منهم
+# =========================
+# كل موضوع ممكن يترتبط بأكتر من فولدر (مثلاً "الكنيسة القديمة" بتجمع
+# صور من كذا فولدر مختلف عن شكل المبنى قديمًا)
+TOPIC_FOLDERS: dict[str, list[str]] = {
+    # الآباء الكهنة
+    "أبونا شنودة دوس": ["الاباء/ابونا شنودة"],
+    "القمص إبراهيم عطية": ["الاباء/ابونا ابراهيم عطية"],
+    "أبونا إبراهيم عطية": ["الاباء/ابونا ابراهيم عطية"],
+    "القمص جرجس مرقس": ["الاباء/ابونا جرجس"],
+    "أبونا أغاثون حنا": ["الاباء/ابونا اغاثون"],
+    "أبونا مينا زكي سليمان": ["الاباء/ابونا مينا"],
+    "القمص ويصا القمص جرجس": ["الاباء/ابونا ويصا"],
+    "أبونا ويصا": ["الاباء/ابونا ويصا"],
 
-    "البابا شنودة الثالث": {
-        "tokens": {"البابا", "شنوده", "الثالث"},
-        "folders": ["زيارات البطاركة/البابا شنودة 1977"],
-    },
-    "البابا كيرلس": {
-        "tokens": {"كيرلس"},
-        "folders": ["زيارات البطاركة/البابا كيرلس 1960"],
-    },
-    "البابا تواضروس": {
-        "tokens": {"تواضروس"},
-        "folders": ["زيارات البطاركة/البابا تواضروس 2015"],
-    },
+    # زيارات البطاركة
+    "البابا شنودة الثالث": ["زيارات البطاركة/البابا شنودة 1977"],
+    "البابا كيرلس السادس": ["زيارات البطاركة/البابا كيرلس 1960"],
+    "البابا تواضروس الثاني": ["زيارات البطاركة/البابا تواضروس 2015"],
 
-    "خدمات الكنيسة": {
-        "tokens": {"خدمات"},
-        "folders": ["خدمات"],
-    },
+    # خدمات الكنيسة (عام)
+    "خدمات الكنيسة": ["خدمات"],
 
-    "تعمير/نشأة/تاريخ الكنيسة": {
-        "tokens": set(),  # بيتفحص بمنطق تاني (أي كلمة من اللي تحت)، شوفي التعليق تحت
-        "any_tokens": {
-            "نشاه", "تعمير", "بناء", "تاسيس", "قصه", "تاريخ", "حكايه", "القديمه",
-        },
-        "folders": [
-            "صور كنيسة القديمة من 77 ل 2007",
-            "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
-            "كنيسة خارجي 90",
-        ],
-    },
+    # شكل الكنيسة/المبنى قديمًا - بتجمع من كل الفولدرات اللي فيها
+    # صور تاريخية للمبنى (قبل التعمير، من برا، الكنيسة القديمة)
+    "الكنيسة القديمة": [
+        "صور كنيسة القديمة من 77 ل 2007",
+        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
+        "كنيسة خارجي 90",
+    ],
+    "بناء الكنيسة": [
+        "صور كنيسة القديمة من 77 ل 2007",
+        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
+        "كنيسة خارجي 90",
+    ],
+    "نشأة الكنيسة": [
+        "صور كنيسة القديمة من 77 ل 2007",
+        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
+        "كنيسة خارجي 90",
+    ],
+    "تعمير الكنيسة": [
+        "صور كنيسة القديمة من 77 ل 2007",
+        "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
+        "كنيسة خارجي 90",
+    ],
 }
 
-
-def _text_tokens(text: str) -> set[str]:
-    normalized = _normalize_arabic(text)
-    return set(_word_re.findall(normalized.lower()))
+CLOUDINARY_SEARCH_LIMIT = 50
+IMAGES_PER_ANSWER = 2
 
 
-def _topic_matches(topic: dict, tokens: set[str]) -> bool:
-    required = topic.get("tokens") or set()
-    if required and required.issubset(tokens):
-        return True
-    any_tokens = topic.get("any_tokens")
-    if any_tokens and (any_tokens & tokens):
-        return True
-    return False
-
-# بدل رقم ثابت (2)، بنبعت مدى: على الأقل حاولي MIN، وبحد أقصى MAX - وده
-# بيعتمد على قد ايه صور فعليًا موجودة في الفولدر(ات) المطابقة
-MIN_IMAGES_PER_ANSWER = 2
-MAX_IMAGES_PER_ANSWER = 5
-
-ASSETS_JSON_PATH = "assets.json"
-
-_folder_to_images: dict[str, list[str]] = {}
+def _detect_topic_folders(question: str, answer: str) -> list[str] | None:
+    """بتدور عن أطول اسم موضوع/شخص معروف متطابق في السؤال أو الرد فقط
+    (مش الـ context الكامل، عشان context بيحتوي كذا موضوع مع بعض وممكن
+    يدي تطابق غلط لموضوع مش ده اللي الرد بيتكلم عنه فعليًا).
+    بترجع قائمة الفولدرات المرتبطة بيه، أو None لو مفيش تطابق."""
+    combined = f"{question} {answer}"
+    sorted_names = sorted(TOPIC_FOLDERS.keys(), key=len, reverse=True)
+    for name in sorted_names:
+        if name in combined:
+            return TOPIC_FOLDERS[name]
+    return None
 
 
-def _load_assets_json():
-    global _folder_to_images
-
-    path = Path(ASSETS_JSON_PATH)
-    if not path.exists():
-        print(f"ASSETS: {ASSETS_JSON_PATH} غير موجود - الصور مش هتظهر")
-        _folder_to_images = {}
-        return
-
-    with open(path, "r", encoding="utf-8") as f:
-        assets = json.load(f)
-
-    grouped: dict[str, list[str]] = {}
-    for asset in assets:
-        folder = asset.get("folder", "")
-        url = asset.get("url")
-        if not folder or not url:
-            continue
-        grouped.setdefault(folder, []).append(url)
-
-    _folder_to_images = grouped
-    total_images = sum(len(v) for v in grouped.values())
-    print(f"ASSETS: تم تحميل {total_images} صورة عبر {len(grouped)} مجلد من {ASSETS_JSON_PATH}")
-
-
-def _normalize_arabic(text: str) -> str:
-    text = re.sub(r"[إأآا]", "ا", text)
-    text = re.sub(r"ة", "ه", text)
-    text = re.sub(r"ى", "ي", text)
-    text = re.sub(r"[\u064B-\u0652]", "", text)
-    return text
-
-
-def _match_topic(text: str) -> list[str] | None:
-    tokens = _text_tokens(text)
-    # لو فيه أكتر من موضوع متطابق، نفضّل الأكثر تحديدًا (أكتر كلمات
-    # مفتاحية مطلوبة اتحققت) - عشان "جرجس مرقس" (كلمتين) يتفوّق على أي
-    # تطابق أعم لو حصل تعارض
-    matches = [
-        (len(topic.get("tokens") or []), name)
-        for name, topic in TOPIC_KEYWORDS.items()
-        if _topic_matches(topic, tokens)
-    ]
-    if not matches:
-        return None
-    matches.sort(reverse=True)
-    _, best_name = matches[0]
-    return TOPIC_KEYWORDS[best_name]["folders"]
-
-
-def _folders_key(folders: list[str]) -> tuple[str, ...]:
-    return tuple(sorted(folders))
-
-
-def _match_dominant_topic_in_answer(answer: str) -> list[str] | None:
-    tokens = _text_tokens(answer)
-    token_counts = Counter(tokens)
-
-    folder_scores: dict[tuple[str, ...], int] = {}
-    for name, topic in TOPIC_KEYWORDS.items():
-        required = topic.get("tokens") or set()
-        any_tokens = topic.get("any_tokens") or set()
-
-        if required:
-            if not required.issubset(tokens):
-                continue
-            # سكور = أقل تكرار بين الكلمات المطلوبة (يعني الاتنين لازم
-            # يتكرروا مع بعض عشان نعتبرها إشارة قوية، مش كلمة عابرة)
-            score = min(token_counts[t] for t in required)
-        elif any_tokens:
-            matched = any_tokens & tokens
-            if not matched:
-                continue
-            score = sum(token_counts[t] for t in matched)
-        else:
-            continue
-
-        key = _folders_key(topic["folders"])
-        folder_scores[key] = folder_scores.get(key, 0) + score
-
-    if not folder_scores:
-        return None
-
-    ranked = sorted(folder_scores.items(), key=lambda pair: pair[1], reverse=True)
-    top_folders, top_score = ranked[0]
-
-    # لو فيه موضوع تاني بنفس التكرار الأعلى، الموقف غامض - منرفقش صور
-    if len(ranked) > 1 and ranked[1][1] == top_score:
-        return None
-
-    return list(top_folders)
-
-
-def _detect_topic_folders(
-    question: str,
-    answer: str,
-    history: list[dict] | None = None,
-) -> tuple[list[str] | None, str]:
-    """بترجّع (الفولدرات المطابقة أو None, مصدر المطابقة) - المصدر بس
-    عشان الطباعة/التتبع (شوفي _detect_priest_images تحت) فتقدري تشوفي
-    في اللوج مصدر القرار جه منين بالظبط: من السؤال، من رسالة سابقة في
-    المحادثة، ولا من الرد (آخر حل، شوفي التعليق تحت).
-
-    الأولوية اتغيّرت عشان "تركّز على السؤال أكتر من الإجابة": السؤال
-    نفسه هو المصدر الأدق دايمًا (المستخدم بيقول اللي عايزه بالظبط).
-    الرد ممكن يفصّل ويوسّع في كذا اسم وموضوع في نفس الوقت (خصوصًا في
-    أسئلة المقارنة زي "مين خدم أكتر")، فاستخدامه كمصدر أساسي كان
-    بيدّي نتايج ملخبطة أحيانًا. فبقى آخر حل بس، مش تاني حاجة نجربها."""
-    folders = _match_topic(question)
-    if folders:
-        return folders, "question"
-
-    if history:
-        for item in reversed(history[-2:]):
-            content = item.get("content", "")
-            folders = _match_topic(content)
-            if folders:
-                return folders, "history"
-
-    # آخر حل بس: لو السؤال نفسه ومفيش حاجة في المحادثة السابقة وضحت
-    # الموضوع، ندوّر في الرد - بس ده أضعف مصدر (ممكن يفصّل في أكتر من
-    # موضوع مع بعض) فبيتفحص بمنطق "الموضوع المسيطر" (تكرار)، ولو النتيجة
-    # غامضة بيرجع None بدل ما يخمّن
-    folders = _match_dominant_topic_in_answer(answer)
-    if folders:
-        return folders, "answer"
-
-    return None, "no_match"
-
-
-def _get_images(
-    folders: list[str],
-    min_count: int = MIN_IMAGES_PER_ANSWER,
-    max_count: int = MAX_IMAGES_PER_ANSWER,
-) -> list[str]:
-    """بتجمع روابط الصور من كل الفولدرات المطلوبة، وتسحب عشوائي منها.
-    بترجع لحد max_count لو متوفرين، أو أقل لو الفولدر فيه صور أقل من
-    كده - يعني العدد بيتغيّر حسب المتاح فعليًا، مش رقم ثابت."""
-    if not _folder_to_images:
-        _load_assets_json()
-
-    all_urls: list[str] = []
+def _get_random_images(folders: list[str], count: int = IMAGES_PER_ANSWER) -> list[str]:
+    """بتجمع الصور من كل الفولدرات المدّاة، وبعدين تسحب عشوائي منها."""
+    all_resources = []
     for folder in folders:
-        all_urls.extend(_folder_to_images.get(folder, []))
+        try:
+            result = (
+                cloudinary.search.Search()
+                .expression(f'folder:"{folder}"')
+                .max_results(CLOUDINARY_SEARCH_LIMIT)
+                .execute()
+            )
+            all_resources.extend(result.get("resources", []))
+        except Exception as exc:
+            print(f"CLOUDINARY SEARCH ERROR (folder={folder}):", exc)
 
-    if not all_urls:
+    if not all_resources:
         return []
 
-    random.shuffle(all_urls)
-    count = min(len(all_urls), max_count)
-    return all_urls[:count]
+    random.shuffle(all_resources)
+    return [r["secure_url"] for r in all_resources[:count]]
 
 
-# الردود دي معناها "مفيش معلومة/مفيش رد فعلي" - لو الرد طلع واحد منهم
-# بالظبط، منرفقش صور خالص، حتى لو السؤال بيتكلم عن شخص معروف عندنا صوره
-NO_INFO_ANSWERS = {
-    FALLBACK_MESSAGE,
-    "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا.",
-}
-
-
-def _detect_priest_images(
-    question: str,
-    answer: str,
-    history: list[dict] | None = None,
-) -> list[str]:
-    if answer.strip() in NO_INFO_ANSWERS:
-        print("IMAGES: الرد اعتذار/فولباك - مفيش صور هترجع مهما كان السؤال")
-        return []
-
-    folders, source = _detect_topic_folders(question, answer, history)
-
+def _detect_priest_images(question: str, answer: str, context: str) -> list[str]:
+    folders = _detect_topic_folders(question, answer)
     if not folders:
-        print(f"IMAGES: مفيش تطابق موضوع (source={source}) - مفيش صور هترجع")
         return []
-
-    images = _get_images(folders)
-
-    # طباعة توضيحية: بتوريكي بالظبط الفولدر(ات) اللي اتحددت ومن أنهي
-    # مصدر (سؤال/رد/هيستوري)، وعدد الصور المتاحة فعليًا فيه مقابل
-    # اللي هيتبعت - عشان تقدري تتأكدي إنه "راح" للفولدر الصح في
-    # assets.json لو فيه شك في نتيجة غريبة
-    available = sum(len(_folder_to_images.get(f, [])) for f in folders)
-    print(
-        f"IMAGES: matched folders={folders} (source={source}) - "
-        f"available={available}, sending={len(images)}"
-    )
-
-    return images
+    return _get_random_images(folders)
 
 
 def load_resources():
@@ -457,12 +264,12 @@ def load_resources():
     _chunks = [c["text"] if isinstance(c, dict) else c for c in _chunks]
 
     _build_bm25_index()
-    _load_assets_json()
 
     print(f"✅ Ready — {len(_chunks)} chunks")
 
 
 def _extract_retry_seconds(response: requests.Response, default: float = 5.0) -> float:
+    """بتقرأ 'Please try again in 14.27s' من رسالة خطأ Groq لو موجودة."""
     try:
         message = response.json().get("error", {}).get("message", "")
         match = re.search(r"try again in ([\d.]+)s", message)
@@ -485,7 +292,8 @@ def _has_language_leak(text: str) -> bool:
 
 
 def _build_messages(question: str, context: str, history: list[dict] | None) -> list[dict]:
-    messages = [{"role": "system", "content": _system_prompt()}]
+    system_content = SYSTEM_PROMPT_TEMPLATE.format(today=date.today().isoformat())
+    messages = [{"role": "system", "content": system_content}]
 
     if history:
         recent_history = history[-MAX_HISTORY_MESSAGES:]
@@ -569,7 +377,7 @@ def answer_question(question: str, history: list[dict] | None = None) -> tuple[s
         if _has_language_leak(answer):
             print("LANGUAGE LEAK DETECTED (not retrying, logged for monitoring):", answer[:150])
 
-        images = _detect_priest_images(question, answer, history)
+        images = _detect_priest_images(question, answer, context)
 
         return answer, images
 
