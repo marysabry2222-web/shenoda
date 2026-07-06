@@ -26,6 +26,8 @@ from config import (
     GEMINI_TTS_MODEL,
     GEMINI_TTS_VOICE,
     GEMINI_TTS_STYLE_PROMPT,
+    GROQ_API_KEY,
+    GROQ_STT_MODEL,
 )
 import rag
 
@@ -126,6 +128,9 @@ def _speech_to_text_pcm(pcm_bytes: bytes) -> str:
     """
     زي _speech_to_text بالظبط، لكن بتاخد صوت PCM16 خام مباشرة (من المكالمة
     الفورية) بدل ما تكتبه ملف webm مؤقت — أسرع ومناسبة أكتر للـ streaming.
+
+    ملحوظة: مش مستخدمة حاليًا في المكالمة (شوفي _speech_to_text_groq
+    تحت) - سيبناها موجودة كـ fallback محلي لو حصل مشكلة مع Groq مستقبلًا.
     """
     whisper = get_whisper()
 
@@ -140,8 +145,47 @@ def _speech_to_text_pcm(pcm_bytes: bytes) -> str:
     texts = [segment.text for segment in segments]
     text = " ".join(texts).strip()
 
-    print("Call transcript:", text)
+    print("Call transcript (local whisper):", text)
 
+    return text
+
+
+async def _speech_to_text_groq(pcm_bytes: bytes) -> str:
+    """
+    بتاخد صوت PCM16 خام (16kHz mono، من المكالمة الفورية) وتبعته لـ Groq
+    Whisper API (large-v3-turbo) كملف WAV في الذاكرة، وترجع النص المفرّغ.
+
+    أدق بكتير من Whisper المحلي (tiny) مع العربي، وبما إنه شغال على
+    سيرفرات Groq مش سيرفرنا، مبياكلش أي RAM/CPU محلي خالص.
+    """
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(CALL_SAMPLE_RATE)
+        wf.writeframes(pcm_bytes)
+    wav_buffer.seek(0)
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            files={"file": ("audio.wav", wav_buffer, "audio/wav")},
+            data={
+                "model": GROQ_STT_MODEL,
+                "language": "ar",
+            },
+        )
+
+        if resp.status_code != 200:
+            print("========== GROQ STT ERROR ==========")
+            print("STATUS:", resp.status_code)
+            print("BODY:", resp.text)
+            resp.raise_for_status()
+
+        text = resp.json().get("text", "").strip()
+
+    print("Call transcript (Groq):", text)
     return text
 
 
@@ -399,7 +443,7 @@ async def _process_utterance(
     try:
         await websocket.send_json({"type": "processing"})
 
-        question = await asyncio.to_thread(_speech_to_text_pcm, pcm_audio)
+        question = await _speech_to_text_groq(pcm_audio)
         if not question:
             return
 
