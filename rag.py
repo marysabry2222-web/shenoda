@@ -126,12 +126,50 @@ For duration questions: use any explicit duration first; otherwise calculate fro
 - Use conversation history for follow-ups.
 - Be warm and respectful.
 - اكتر كاهن خدم هو ابونا ويصا عشان خدم 45 سنة
+- Name disambiguation: "القمص جرجس مرقس" = the father (served 1959-1975, died 1975). "القمص ويصا القمص جرجس" / "القس ويصا القمص جرجس" / "الدكتور أنسي القمص جرجس" = his son, a different person, same "جرجس" surname only.
+  Rule: if query mentions "ويصا" or "أنسي" → use only sentences containing those words; ignore sentences with "جرجس مرقس" alone.
+  If query mentions "جرجس"/"جرجس مرقس" without "ويصا"/"أنسي" → use only sentences with "جرجس مرقس"; ignore "ويصا" sentences.
+  Never merge both unless explicitly asked about their relation (then: ويصا is جرجس مرقس's son).
 """
+
 
 def _system_prompt() -> str:
     from datetime import date
     today = date.today().strftime("%Y-%m-%d")
     return SYSTEM_PROMPT_TEMPLATE.format(today=today)
+
+
+# =========================
+# تريجر ترحيب البابا (عند ذكر "معاك قداسة البابا" أو "البابا تواضروس")
+# =========================
+# ده مش جزء من الـ RAG/LLM - بيتفحص قبل أي استرجاع أو نداء API، فبيوفر
+# وقت وتوكنز، وبيرجع رد ثابت + رابط لحن صوتي بدل ما يستنى رد من الموديل.
+PAPAL_GREETING_TRIGGERS = {
+    "معاك قداسه البابا",
+    "البابا تواضروس",
+    "قداسه البابا تواضروس",
+    "البابا تواضرس",
+}
+PAPAL_GREETING_REPLY = "أهلًا وسهلًا يا قداسة البابا، حابين نرحب بقداستك، وهنشغل لحن أفلوجيمينوس."
+PAPAL_HYMN_URL = "https://res.cloudinary.com/y7ev5cpa/video/upload/v1783374987/audiomass-output_fqmcn4.mp3"
+
+
+def _papal_greeting_already_played(history: list[dict] | None) -> bool:
+    """بنستخدم الـ history نفسه كمصدر state بدل call_id/call_state -
+    لو الرد ده اتقال قبل كده في نفس المحادثة، ميتكررش تاني."""
+    if not history:
+        return False
+    return any(
+        item.get("role") == "assistant" and item.get("content") == PAPAL_GREETING_REPLY
+        for item in history
+    )
+
+
+def _check_papal_greeting_trigger(question: str, history: list[dict] | None) -> bool:
+    if _papal_greeting_already_played(history):
+        return False
+    normalized = _normalize_arabic(question).lower()
+    return any(phrase in normalized for phrase in PAPAL_GREETING_TRIGGERS)
 
 
 FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، ممكن تجرب تاني بعد شوية؟"
@@ -427,16 +465,10 @@ def _load_assets_json():
     total_images = sum(len(v) for v in grouped.values())
     print(f"ASSETS: تم تحميل {total_images} صورة عبر {len(grouped)} مجلد من {ASSETS_JSON_PATH}")
 
-    # طباعة توضيحية: كل أسماء الفولدرات الموجودة فعليًا في assets.json،
-    # عشان نقدر نقارنها بسهولة مع الأسماء المكتوبة في TOPIC_KEYWORDS
-    # ونمسك أي فرق بسيط في الاسم (زي "البابا كيرلس 1960" مقابل الاسم
-    # الحقيقي) هو اللي بيسبب available=0 في اللوج.
     print("ASSETS: أسماء الفولدرات المتاحة فعليًا:")
     for folder_name in sorted(grouped.keys()):
         print(f"   - '{folder_name}' ({len(grouped[folder_name])} صورة)")
 
-    # تحذير مبكر: أي فولدر مكتوب في TOPIC_KEYWORDS لكنه مش موجود فعليًا
-    # في assets.json - يعني أي سؤال يطابق الموضوع ده هيرجع صفر صور دايمًا
     known_folders = {f for topic in TOPIC_KEYWORDS.values() for f in topic["folders"]}
     missing = known_folders - set(grouped.keys())
     if missing:
@@ -634,24 +666,12 @@ def _build_messages(question: str, context: str, history: list[dict] | None) -> 
 # =========================
 # مزوّدين مختلفين للـ LLM: Cerebras (أساسي) و Groq (fallback على مستويين)
 # =========================
-# ليه Cerebras أساسي: حد التوكنز في الدقيقة (TPM) عندهم أعلى بكتير من
-# Groq (30,000 مقابل 6,000)، فبيتحمّل الـ context الكبير اللي بنبعته
-# من غير ما يضرب rate limit كل شوية. في المقابل، حد الطلبات في الدقيقة
-# (RPM) عندهم أقل (5 بس) - فلو حصل ضغط طلبات فجأة (كذا مستخدم في نفس
-# اللحظة)، ده هو اللي المفروض يضرب الحد مش التوكنز.
-#
-# ترتيب الـ fallback:
-#   1) Cerebras gpt-oss-120b (أساسي)
-#   2) Groq gpt-oss-20b (نفس عائلة gpt-oss - أقرب أسلوب لل-120b)
-#   3) Groq llama-3.3-70b (حل أخير - أسلوب مختلف شوية عن gpt-oss)
 CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
 CEREBRAS_CHAT_MODEL = "gpt-oss-120b"
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 MAX_RETRIES_PRIMARY = MAX_RETRIES
-# عدد محاولات الـ fallback - أقل من الأساسي لأنه أصلاً حل احتياطي، مش
-# عايزين نضيّع وقت طويل عليه لو هو كمان فاشل
 FALLBACK_MAX_RETRIES = 1
 
 
@@ -671,21 +691,13 @@ def _call_chat_completions(
     model_lower = model.lower()
 
     if "qwen" in model_lower:
-        # qwen3 بيدعم "none" فعليًا لقفل التفكير تمامًا - ده أرخص خيار
         payload["reasoning_effort"] = "none"
         payload["reasoning_format"] = "hidden"
     elif "gpt-oss" in model_lower:
-        # gpt-oss (سواء على Cerebras أو Groq) بيدعم بس low/medium/high -
-        # "none" مش قيمة مسموحة ليه (على عكس qwen3) وهترجع 400 لو
-        # اتبعتت. "low" هو أقل استهلاك توكنز ممكن مع الحفاظ على جودة
-        # معقولة للرد.
         payload["reasoning_effort"] = "low"
-        # reasoning_format حاجة خاصة بـ Groq بس (مش موجودة في توثيق
-        # Cerebras) - نضيفها بس لو الطلب فعليًا رايح لـ Groq
         if "groq.com" in url:
             payload["reasoning_format"] = "hidden"
     elif "llama" in model_lower:
-        # Llama مش موديل reasoning - مبنبعتلوش أي reasoning_* خالص
         pass
 
     return requests.post(
@@ -706,15 +718,6 @@ def _attempt_completion(
     model: str,
     max_retries: int,
 ) -> requests.Response | None:
-    """بتحاول تاخد رد ناجح (status 200) من مزوّد/موديل معين، بمحاولات
-    retry لكل من: مشاكل الشبكة، rate limit (429)، وأخطاء السيرفر (5xx).
-
-    بترجع الـ response عند النجاح، أو None لو كل المحاولات المسموحة
-    (max_retries + 1) فشلت - عشان اللي بينده الدالة (answer_question)
-    يقرر يجرب مزوّد/موديل تاني (fallback) أو يرجع رسالة الفولباك النهائية.
-
-    ملحوظة: أخطاء 400 (زي طلب مكوّن غلط) بتترفع فورًا من غير أي retry -
-    إعادة نفس الطلب الغلط هتفشل تاني بنفس الشكل، فمفيش فايدة من الانتظار."""
     for attempt in range(max_retries + 1):
         is_last_attempt = attempt == max_retries
 
@@ -750,21 +753,23 @@ def _attempt_completion(
             time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
             continue
 
-        # أي خطأ 4xx تاني (زي 400 Bad Request) مش هيتصلح بإعادة نفس
-        # الطلب - نرفعه فورًا بدل ما نضيّع وقت في retries هتفشل برضه
         resp.raise_for_status()
         return resp
 
     return None
 
 
-def answer_question(question: str, history: list[dict] | None = None) -> tuple[str, list[str]]:
+def answer_question(question: str, history: list[dict] | None = None) -> tuple[str, list[str], str | None]:
+    # تريجر ترحيب البابا - بيتفحص الأول قبل أي RAG أو نداء LLM، عشان
+    # يبقى فوري ومايستهلكش توكنز/وقت من غير داعي
+    if _check_papal_greeting_trigger(question, history):
+        print("PAPAL GREETING TRIGGERED — skipping RAG/LLM, returning hymn directly")
+        return PAPAL_GREETING_REPLY, [], PAPAL_HYMN_URL
+
     context = _retrieve_context(question, history)
     print("CONTEXT LENGTH (chars):", len(context))
     messages = _build_messages(question, context, history)
 
-    # المستوى 1: Cerebras (gpt-oss-120b) - أساسي، بكل محاولات الـ retry
-    # العادية (MAX_RETRIES_PRIMARY)
     try:
         resp = _attempt_completion(
             messages, CEREBRAS_URL, CEREBRAS_API_KEY, CEREBRAS_CHAT_MODEL, MAX_RETRIES_PRIMARY
@@ -773,8 +778,6 @@ def answer_question(question: str, history: list[dict] | None = None) -> tuple[s
         print(f"[{CEREBRAS_CHAT_MODEL}] Bad request (not retrying): {exc}")
         resp = None
 
-    # المستوى 2: Groq gpt-oss-20b - نفس عائلة الموديل الأساسي، فبيحافظ
-    # على نفس أسلوب الإجابة تقريبًا أكتر من Llama
     if resp is None:
         print(f"{CEREBRAS_CHAT_MODEL} (Cerebras) failed - trying {GROQ_SECONDARY_MODEL} (Groq)")
         try:
@@ -785,7 +788,6 @@ def answer_question(question: str, history: list[dict] | None = None) -> tuple[s
             print(f"[{GROQ_SECONDARY_MODEL}] Bad request (not retrying): {exc}")
             resp = None
 
-    # المستوى 3: Groq llama-3.3-70b - حل أخير قبل رسالة الفولباك النهائية
     if resp is None:
         print(f"{GROQ_SECONDARY_MODEL} failed - trying {GROQ_TERTIARY_MODEL} (Groq)")
         try:
@@ -796,14 +798,10 @@ def answer_question(question: str, history: list[dict] | None = None) -> tuple[s
             print(f"[{GROQ_TERTIARY_MODEL}] Bad request (not retrying): {exc}")
             resp = None
 
-    # لو الثلاثة فشلوا، مفيش حاجة تانية نعملها - رسالة الفولباك النهائية
     if resp is None:
-        return FALLBACK_MESSAGE, []
+        return FALLBACK_MESSAGE, [], None
 
     answer = resp.json()["choices"][0]["message"]["content"].strip()
-
-    # تنضيف أي تفكير داخلي (<think>...) قبل استخدام الرد أو فحصه - آمن
-    # حتى لو الرد جه من Llama (مش موديل reasoning، فمش هيفرق حاجة)
     answer = _strip_thinking(answer)
 
     if _has_language_leak(answer):
@@ -811,4 +809,4 @@ def answer_question(question: str, history: list[dict] | None = None) -> tuple[s
 
     images = _detect_priest_images(question, answer, history)
 
-    return answer, images
+    return answer, images, None
