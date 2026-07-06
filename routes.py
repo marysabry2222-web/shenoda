@@ -37,43 +37,22 @@ router = APIRouter()
 # إعدادات المكالمة الفورية (Real-time call)
 # =========================
 
-CALL_SAMPLE_RATE = 16000          # لازم يطابق اللي العميل بيبعته بالظبط
-CALL_FRAME_MS = 20                # مدة الفريم الواحد لـ webrtcvad (لازم 10/20/30ms)
-CALL_FRAME_BYTES = int(CALL_SAMPLE_RATE * CALL_FRAME_MS / 1000) * 2  # 640 بايت (PCM16 mono)
-CALL_SILENCE_MS = 700             # سكوت متواصل بالقد ده = المستخدم خلص كلامه
+CALL_SAMPLE_RATE = 16000
+CALL_FRAME_MS = 20
+CALL_FRAME_BYTES = int(CALL_SAMPLE_RATE * CALL_FRAME_MS / 1000) * 2
+CALL_SILENCE_MS = 700
 CALL_SILENCE_FRAMES = CALL_SILENCE_MS // CALL_FRAME_MS
-CALL_VAD_AGGRESSIVENESS = 2       # 0 (أقل حساسية) إلى 3 (أعلى حساسية لفلترة الضوضاء)
+CALL_VAD_AGGRESSIVENESS = 2
 
-# أقل عدد فريمات كلام متتالية عشان نعتبرها "بداية كلام حقيقية" ونقاطع
-# بيها أي رد شغال - بتحمي من إن ضوضاء عابرة أو نفس بسيط يلغي المعالجة
-# غلط. 3 فريمات × 20ms = 60ms متواصلة من الكلام الفعلي.
 MIN_SPEECH_FRAMES_TO_INTERRUPT = 3
 
-# =========================
-# فلترة الهمس/الضوضاء الخافتة قبل الـ STT
-# =========================
-# المشكلة: webrtcvad بيكتشف نشاط صوتي بناءً على خصائص التردد (frequency
-# shape) مش على مستوى الطاقة/الحجم. يعني همسة أو نفس خفيف ممكن "يعدي"
-# كـ speech من وجهة نظر الـ VAD، فيوصل لـ Whisper كصوت شبه-صامت،
-# وWhisper بيهلوس أقرب كلمة عربية شكلها منطقي (زي "نانسي") بدل ما يرجع
-# نص فاضي. الحل: فلترة إضافية بالطاقة (RMS) + رفض أي utterance قصيرة
-# جدًا، قبل ما نبعت أي حاجة لـ Groq Whisper.
-
-# أقل مدة utterance مقبولة بالمللي ثانية - أقل من كده غالبًا نفس/همس/
-# ضوضاء عابرة مش كلام فعلي
 MIN_UTTERANCE_MS = 1000
 MIN_UTTERANCE_BYTES = int(CALL_SAMPLE_RATE * MIN_UTTERANCE_MS / 1000) * 2
 
-# أقل RMS مقبول - همس بيديك أرقام واطية جدًا (تقريبًا 100-400) مقارنة
-# بكلام عادي (بيبدأ من ~800 وطالع). لو لسه بيسمع همس بعد التفعيل،
-# ارفعيها لـ 700-800. لو بدأ يقطع كلام عادي واطي الصوت، نزّليها لـ
-# 350-400.
 MIN_SPEECH_RMS = 500.0
 
 
 def _is_too_quiet(pcm_bytes: bytes) -> bool:
-    """بترجع True لو مستوى الطاقة (RMS) للـ utterance ده تحت العتبة
-    المقبولة - يعني على الأغلب همس أو نفس أو ضوضاء خافتة، مش كلام فعلي."""
     audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
     if audio.size == 0:
         return True
@@ -81,10 +60,8 @@ def _is_too_quiet(pcm_bytes: bytes) -> bool:
     return rms < MIN_SPEECH_RMS
 
 
-# صوت الرد من Gemini بيرجع PCM16 خام 24kHz - بنقطّعه لشرائح صغيرة
-# قبل الإرسال عشان نحاكي التدفق (streaming) للعميل ونسمح بالإلغاء الفوري
 GEMINI_TTS_SAMPLE_RATE = 24000
-GEMINI_AUDIO_CHUNK_BYTES = 4800   # ~100ms عند 24kHz/16-bit mono
+GEMINI_AUDIO_CHUNK_BYTES = 4800
 
 # =========================
 # Whisper
@@ -157,13 +134,6 @@ def _speech_to_text(audio_bytes: bytes) -> str:
 
 
 def _speech_to_text_pcm(pcm_bytes: bytes) -> str:
-    """
-    زي _speech_to_text بالظبط، لكن بتاخد صوت PCM16 خام مباشرة (من المكالمة
-    الفورية) بدل ما تكتبه ملف webm مؤقت — أسرع ومناسبة أكتر للـ streaming.
-
-    ملحوظة: مش مستخدمة حاليًا في المكالمة (شوفي _speech_to_text_groq
-    تحت) - سيبناها موجودة كـ fallback محلي لو حصل مشكلة مع Groq مستقبلًا.
-    """
     whisper = get_whisper()
 
     audio_array = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
@@ -183,13 +153,6 @@ def _speech_to_text_pcm(pcm_bytes: bytes) -> str:
 
 
 async def _speech_to_text_groq(pcm_bytes: bytes) -> str:
-    """
-    بتاخد صوت PCM16 خام (16kHz mono، من المكالمة الفورية) وتبعته لـ Groq
-    Whisper API (large-v3-turbo) كملف WAV في الذاكرة، وترجع النص المفرّغ.
-
-    أدق بكتير من Whisper المحلي (tiny) مع العربي، وبما إنه شغال على
-    سيرفرات Groq مش سيرفرنا، مبياكلش أي RAM/CPU محلي خالص.
-    """
     wav_buffer = io.BytesIO()
     with wave.open(wav_buffer, "wb") as wf:
         wf.setnchannels(1)
@@ -228,9 +191,6 @@ GEMINI_TTS_URL = (
 
 
 def _build_gemini_tts_payload(text: str) -> dict:
-    # بندمج تعليمات الأسلوب (اللهجة المصرية) مع النص نفسه في حقل واحد،
-    # لأن الـ API ده (على عكس Cloud TTS) معندوش حقل "prompt" منفصل -
-    # التوجيه بيتحقق بلغة طبيعية جوه نفس النص المُرسل.
     styled_text = f"{GEMINI_TTS_STYLE_PROMPT}\n\n{text}"
 
     return {
@@ -247,16 +207,6 @@ def _build_gemini_tts_payload(text: str) -> dict:
 
 
 async def _gemini_text_to_speech(text: str) -> bytes:
-    """
-    بترجع صوت PCM16 خام 24kHz mono جاهز للإرسال للعميل.
-
-    بنستخدم استدعاء غير متدفق (generateContent) بدل streamGenerateContent
-    لأن دعم الـ streaming الحقيقي لموديل 3.1 لسه غير مؤكد بثبات في كل
-    التوثيقات وقت كتابة الكود ده. بنحاكي "التدفق" للعميل بتقطيع الصوت
-    لشرائح صغيرة قبل الإرسال في _process_utterance، وده كافي لتجربة
-    مستخدم سلسة وقابلية إلغاء فورية (barge-in) حتى لو التوليد نفسه
-    بيحصل دفعة واحدة على السيرفر.
-    """
     print("ENTERED GEMINI TTS")
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
@@ -268,8 +218,6 @@ async def _gemini_text_to_speech(text: str) -> bytes:
             json=_build_gemini_tts_payload(text),
         )
 
-        # نطبع رد جوجل كامل لو مش 200 عشان نعرف سبب الفشل بالظبط
-        # (مفتاح غلط، صلاحية preview، شكل الطلب، إلخ)
         if resp.status_code != 200:
             print("========== GEMINI TTS ERROR ==========")
             print("STATUS:", resp.status_code)
@@ -291,14 +239,17 @@ async def _gemini_text_to_speech(text: str) -> bytes:
 # RAG / LLM
 # =========================
 
-async def get_answer(question: str, history: list[HistoryItem] | None = None) -> tuple[str, list[str]]:
+async def get_answer(
+    question: str, history: list[HistoryItem] | None = None
+) -> tuple[str, list[str], str | None]:
+    """بترجع (answer, images, audio_url). audio_url بيبقى None في الحالات
+    العادية، وبيتحدد بس لما تريجر خاص (زي ترحيب البابا) يشتغل في
+    rag.answer_question ويرجع رابط صوت جاهز بدل ما يمر على الـ LLM."""
     print("Question:", question)
 
-    # بنحول الـ Pydantic models لـ plain dicts (role/content) عشان rag.py
-    # يستخدمها مباشرة كـ messages جاهزة لـ Groq من غير ما يعتمد على pydantic
     history_dicts = [item.model_dump() for item in history] if history else []
 
-    answer, images,audio_url = await asyncio.to_thread(
+    answer, images, audio_url = await asyncio.to_thread(
         rag.answer_question,
         question,
         history_dicts
@@ -307,8 +258,12 @@ async def get_answer(question: str, history: list[HistoryItem] | None = None) ->
     print("Answer:", answer)
     if images:
         print("Images:", images)
+    if audio_url:
+        print("Audio URL:", audio_url)
 
-    return answer, images
+    return answer, images, audio_url
+
+
 # =========================
 # Models
 # =========================
@@ -351,9 +306,9 @@ async def chat(request: ChatRequest):
         )
 
     try:
-        answer, images,audio_url = await get_answer(request.message, request.history)
+        answer, images, audio_url = await get_answer(request.message, request.history)
 
-        return ChatResponse(answer=answer, images=images)
+        return ChatResponse(answer=answer, images=images, audio_url=audio_url)
 
     except Exception:
         traceback.print_exc()
@@ -402,15 +357,13 @@ async def voice(audio: UploadFile = File(...)):
                 detail="Could not transcribe audio"
             )
 
-        # ملحوظة: /voice لسه مبيستقبلش history من الفرونت إند حاليًا
-        # (sendVoice في api.ts لسه بيبعت الصوت بس). ممكن نضيفها لاحقًا
-        # لو حابين محادثات الصوت تبقى فيها سياق زي الشات النصي.
-        answer_text, images , audio_url= await get_answer(question)
+        answer_text, images, audio_url = await get_answer(question)
 
         return {
             "transcript": question,
             "answer": answer_text,
             "images": images,
+            "audio_url": audio_url,
         }
 
     except Exception:
@@ -428,35 +381,20 @@ async def voice(audio: UploadFile = File(...)):
 # بروتوكول المكالمة الفورية بين العميل (useCall.ts) والسيرفر ده:
 #
 # Client → Server:
-#   - Binary frames: صوت PCM16 خام، mono، 16000Hz. العميل يبعت الصوت أول
-#     بأول من غير ما يستنى — أي حجم chunk، السيرفر بيقطّعها لفريمات
-#     640 بايت (20ms) بنفسه. **مهم**: ده لازم صوت PCM خام (من
-#     AudioWorklet)، مش webm/opus من MediaRecorder، لأن webrtcvad محتاج
-#     فريمات ثابتة الحجم من صوت خام عشان يشتغل.
-#   - {"type": "mic_muted"}                  لما المستخدم يعمل Mute؛ السيرفر بيمسح
-#                                             فورًا أي كلام متجمع لسه ماخلصش بدل ما
-#                                             يستنى سكوت (اللي مش هيجي أصلاً لو
-#                                             العميل وقف بعت الصوت خالص).
+#   - Binary frames: صوت PCM16 خام، mono، 16000Hz.
+#   - {"type": "mic_muted"}
 #
 # Server → Client:
-#   - {"type": "interrupted"}                لما المستخدم يبدأ كلام جديد أثناء تشغيل صوت؛
-#                                             العميل لازم يوقف أي صوت شغال فورًا
-#   - {"type": "processing"}                 لما السكوت يتاكد والسيرفر بدأ STT/LLM
-#   - {"type": "transcript", "text": "..."}  بعد ما الـ STT يخلص
-#   - {"type": "answer_text", "text": "..."} بعد ما الـ LLM يرد
-#   - {"type": "answer_audio_start"}         قبل ما نبعت صوت الرد
+#   - {"type": "interrupted"}
+#   - {"type": "processing"}
+#   - {"type": "transcript", "text": "..."}
+#   - {"type": "answer_text", "text": "..."}
+#   - {"type": "answer_audio_start"}
 #   - Binary frames: صوت PCM16 خام 24kHz mono على شرائح ~100ms
-#   - {"type": "answer_audio_end"}           بعد ما الصوت يخلص
-#
-# التبعيات الجديدة المطلوبة: pip install webrtcvad httpx
-#
-# ملاحظة مهمة عن الـ barge-in:
-# الإلغاء (cancel) بيحصل بس لما فيه صوت رد فعليًا بيتشغل عند العميل
-# (call_state["speaking"] == True). لو المساعد لسه "بيفكر" (STT/LLM/TTS
-# قاعدين شغالين بصمت، قبل ما أي صوت يوصل للعميل)، أي كلام/ضوضاء من
-# المستخدم في اللحظة دي *مبيلغيش* المهمة الشغالة - لأن مفيش صوت أصلاً
-# نقاطعه. المهمة بتكمل عادي وتوصل لآخرها، وبعدها لو فيه utterance جديدة
-# اتجمعت في الأثناء، هتتعالج بعد ما المهمة الحالية تخلص.
+#   - {"type": "answer_audio_end"}
+#   - {"type": "play_url", "url": "..."}   جديد: لما الرد عبارة عن رابط
+#     صوت جاهز (زي لحن ترحيب البابا) بدل PCM متولّد من TTS - العميل
+#     يشغّله مباشرة بـ Audio API عادي، مش عبر مسار الـ PCM streaming.
 
 
 async def _process_utterance(
@@ -464,16 +402,6 @@ async def _process_utterance(
     pcm_audio: bytes,
     call_state: dict,
 ) -> None:
-    """
-    STT → LLM → TTS لجملة واحدة كاملة. الدالة دي بتتشغل كـ asyncio.Task
-    منفصلة عشان لو المستخدم قاطع بالكلام أثناء تشغيل الصوت فعليًا
-    (barge-in)، السيرفر يقدر يلغيها فورًا (asyncio.CancelledError).
-
-    call_state["speaking"] بتتحول True بس في اللحظة اللي أول شريحة صوت
-    بتتبعت فعليًا للعميل، وترجع False تاني في أي مخرج من الدالة (نجاح،
-    إلغاء، أو error) - عشان الـ websocket handler يعرف بالظبط إمتى
-    الإلغاء يكون له معنى فعلي.
-    """
     try:
         await websocket.send_json({"type": "processing"})
 
@@ -483,29 +411,36 @@ async def _process_utterance(
 
         await websocket.send_json({"type": "transcript", "text": question})
 
-        answer_text, images , audio_url = await get_answer(question)
+        answer_text, images, audio_url = await get_answer(question)
 
         if images:
             await websocket.send_json({"type": "images", "images": images})
 
         await websocket.send_json({"type": "answer_text", "text": answer_text})
 
+        # لو فيه رابط صوت جاهز (تريجر خاص زي ترحيب البابا)، ابعتيه
+        # مباشرة للعميل يشغله - من غير ما تمري على Gemini TTS خالص
+        if audio_url:
+            await websocket.send_json({"type": "answer_audio_start"})
+            call_state["speaking"] = True
+            await websocket.send_json({"type": "play_url", "url": audio_url})
+            await websocket.send_json({"type": "answer_audio_end"})
+            return
+
         audio_data = await _gemini_text_to_speech(answer_text)
         print("Audio bytes:", len(audio_data))
 
         await websocket.send_json({"type": "answer_audio_start"})
-        call_state["speaking"] = True  # من هنا بس الإلغاء بقى له معنى
+        call_state["speaking"] = True
 
         for i in range(0, len(audio_data), GEMINI_AUDIO_CHUNK_BYTES):
             chunk = audio_data[i:i + GEMINI_AUDIO_CHUNK_BYTES]
             await websocket.send_bytes(chunk)
-            await asyncio.sleep(0)  # نسيب فرصة لـ event loop يعالج cancel لو حصل
+            await asyncio.sleep(0)
 
         await websocket.send_json({"type": "answer_audio_end"})
 
     except asyncio.CancelledError:
-        # اتلغت بسبب barge-in حقيقي أثناء تشغيل الصوت - مفيش داعي نبعت
-        # حاجة تانية، الـ "interrupted" اتبعتت فعلًا لحظة ما المستخدم بدأ يتكلم
         raise
 
     except Exception:
@@ -516,7 +451,7 @@ async def _process_utterance(
                 "message": "حصل خطأ أثناء معالجة الرد"
             })
         except Exception:
-            pass  # الاتصال ممكن يكون اتقفل بالفعل
+            pass
 
     finally:
         call_state["speaking"] = False
@@ -528,15 +463,13 @@ async def call_websocket(websocket: WebSocket):
 
     vad = webrtcvad.Vad(CALL_VAD_AGGRESSIVENESS)
 
-    incoming_buffer = bytearray()   # بايتات وصلت لسه ماتقسمتش لفريمات
-    utterance_buffer = bytearray()  # الفريمات اللي بتتجمع لحد ما الجملة تخلص
+    incoming_buffer = bytearray()
+    utterance_buffer = bytearray()
     is_user_speaking = False
     silence_frame_count = 0
-    speech_frame_count = 0  # عدد فريمات الكلام المتتالية - لتفادي false positives
+    speech_frame_count = 0
     current_task: asyncio.Task | None = None
 
-    # حالة مشتركة بين الـ handler والـ _process_utterance الحالية - بتقول
-    # لنا هل فيه صوت رد فعليًا بيتشغل دلوقتي عند العميل ولا لأ
     call_state = {"speaking": False}
 
     try:
@@ -547,18 +480,12 @@ async def call_websocket(websocket: WebSocket):
                 break
 
             if message.get("text") is not None:
-                # رسالة تحكم (JSON) من العميل - مش صوت
                 try:
                     control = json.loads(message["text"])
                 except (TypeError, json.JSONDecodeError):
                     continue
 
                 if control.get("type") == "mic_muted":
-                    # المستخدم عمل Mute - نمسح أي كلام متجمع لسه ماخلصش
-                    # فورًا، بدل ما نستنى سكوت (اللي مش هيجي أصلاً لأن
-                    # مفيش صوت هيتبعت خالص من هنا لحد الـ Unmute). كده
-                    # الجملة الناقصة دي بتتجاهل تمامًا ومش هتتعالج لما
-                    # المستخدم يرجع يتكلم تاني.
                     incoming_buffer.clear()
                     utterance_buffer.clear()
                     is_user_speaking = False
@@ -570,7 +497,7 @@ async def call_websocket(websocket: WebSocket):
 
             chunk = message.get("bytes")
             if chunk is None:
-                continue  # نوع رسالة تاني غير متوقع - نتجاهله
+                continue
 
             incoming_buffer.extend(chunk)
 
@@ -584,17 +511,10 @@ async def call_websocket(websocket: WebSocket):
                     speech_frame_count += 1
 
                     if not is_user_speaking:
-                        # لسه ماوصلناش لعدد الفريمات الكافي - ممكن تكون
-                        # ضوضاء عابرة، مننفعلش على أساسها لسه
                         if speech_frame_count < MIN_SPEECH_FRAMES_TO_INTERRUPT:
                             utterance_buffer.extend(frame)
                             continue
 
-                        # اتأكدنا إنه كلام حقيقي (60ms+). دلوقتي نفرّق:
-                        # لو فيه صوت رد بيتشغل فعليًا → دي مقاطعة حقيقية،
-                        # نلغي ونبعت interrupted. لو المساعد لسه بيفكر
-                        # بصمت (مفيش صوت اتبعت للعميل لسه) → متلغيش حاجة،
-                        # سيبي المهمة تكمل وخلاص.
                         if current_task is not None and not current_task.done():
                             if call_state.get("speaking"):
                                 print("REAL interrupt detected - cancelling in-progress speech")
@@ -610,7 +530,7 @@ async def call_websocket(websocket: WebSocket):
                     silence_frame_count = 0
 
                 elif is_user_speaking:
-                    utterance_buffer.extend(frame)  # نسيب شوية سكوت طبيعي في الآخر
+                    utterance_buffer.extend(frame)
                     silence_frame_count += 1
 
                     if silence_frame_count >= CALL_SILENCE_FRAMES:
@@ -620,11 +540,6 @@ async def call_websocket(websocket: WebSocket):
                         silence_frame_count = 0
                         speech_frame_count = 0
 
-                        # فلترة الهمس/الضوضاء الخافتة: لو الـ utterance
-                        # قصيرة جدًا أو مستوى الطاقة (RMS) بتاعها تحت
-                        # العتبة، دي غالبًا همسة/نفس/ضوضاء مش كلام فعلي -
-                        # نرفضها هنا قبل ما توصل لـ Groq Whisper خالص
-                        # (توفير في الـ API calls كمان)
                         if len(finished_utterance) < MIN_UTTERANCE_BYTES or _is_too_quiet(finished_utterance):
                             print(
                                 f"Utterance rejected (too short/quiet - "
@@ -632,10 +547,6 @@ async def call_websocket(websocket: WebSocket):
                             )
                             continue
 
-                        # لو لسه فيه مهمة سابقة شغالة (بتفكر أو بتتكلم)،
-                        # منبدأش وحدة جديدة فوقها - كده بنمنع تداخل الصوت
-                        # وتضارب طلبات الـ LLM. الجملة دي هتتجاهل ببساطة
-                        # (المستخدم هيحتاج يعيدها بعد ما الرد الحالي يخلص).
                         if current_task is not None and not current_task.done():
                             print("Previous response still in progress - ignoring this utterance")
                             continue
@@ -645,8 +556,6 @@ async def call_websocket(websocket: WebSocket):
                             "starting processing task"
                         )
 
-                        # تشخيص مؤقت: نحفظ آخر جملة كملف WAV نقدر نسمعه
-                        # عبر /debug/last-call-audio - نشيل ده بعد ما نحل المشكلة
                         try:
                             with wave.open("/tmp/last_call_utterance.wav", "wb") as wf:
                                 wf.setnchannels(1)
@@ -660,10 +569,6 @@ async def call_websocket(websocket: WebSocket):
                             _process_utterance(websocket, finished_utterance, call_state)
                         )
                 else:
-                    # سكوت والمستخدم مش بيتكلم أصلاً - نصفّر عداد الكلام
-                    # ونمسح أي فريمات ضوضاء عابرة كانت اتضافت تخمينًا
-                    # (قبل ما توصل لـ MIN_SPEECH_FRAMES_TO_INTERRUPT) عشان
-                    # متتسربش وتتلزق في أول الجملة الحقيقية اللي بعدها
                     speech_frame_count = 0
                     if not is_user_speaking:
                         utterance_buffer.clear()
