@@ -371,13 +371,12 @@ async def chat(request: ChatRequest):
 @router.post("/tts")
 async def tts_endpoint(request: TTSRequest):
     try:
-        audio_data = await _text_to_speech(request.text)
+        audio_data = await _gemini_text_to_speech(request.text)
 
         return StreamingResponse(
             io.BytesIO(audio_data),
-            media_type="audio/mpeg"
+            media_type="audio/pcm"
         )
-
     except Exception:
         traceback.print_exc()
 
