@@ -4,7 +4,8 @@ load_dotenv()
 
 EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 MIN_SIMILARITY = 0.35
-
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
+CEREBRAS_CHAT_MODEL: str = "gpt-oss-120b"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # الموديل الرئيسي للرد على الأسئلة (openai/gpt-oss-120b اتعمله deprecate
