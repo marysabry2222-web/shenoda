@@ -1,197 +1,327 @@
-import { useCallback, useEffect } from 'react';
-import { FaMicrophone, FaMicrophoneSlash, FaPhoneSlash } from 'react-icons/fa';
-import { MdGraphicEq } from 'react-icons/md';
-import { AssistantAvatar } from './AssistantAvatar';
-import { useCall, type CallStatus } from '../hooks/useCall';
+import { useState, useRef, useCallback } from 'react';
 
-interface CallModalProps {
-  onClose: () => void;
-  onTranscript: (text: string) => void;
-  onAnswer: (text: string) => void;
+export type CallStatus =
+  | 'idle'
+  | 'connecting'
+  | 'listening'   // المايك فاتح، السيرفر بيسمع طول الوقت
+  | 'processing'  // المستخدم سكت، السيرفر بيعالج (STT/LLM) قبل الرد
+  | 'speaking'    // صوت رد المساعد بيتشغل
+  | 'error';
+
+interface UseCallOptions {
+  onTranscript: (text: string) => void;   // اللي المستخدم قاله
+  onAnswer: (text: string) => void;        // رد المساعد النصي
 }
 
-/** Human-readable Arabic status label */
-function statusLabel(status: CallStatus): string {
-  switch (status) {
-    case 'connecting':  return 'جاري الاتصال...';
-    case 'listening':   return 'تحدث الآن...';
-    case 'processing':  return 'شنودة بيفكر...';
-    case 'speaking':    return 'شنودة بيتكلم...';
-    case 'error':       return 'حدث خطأ';
-    default:            return '';
+interface UseCallReturn {
+  status: CallStatus;
+  startCall: () => void;
+  endCall: () => void;
+  toggleMic: () => void; // كتم/إلغاء كتم المايك أثناء المكالمة (مش لازم للتشغيل العادي)
+  isMicMuted: boolean;
+  isCallActive: boolean;
+  errorMsg: string | null;
+}
+
+const WS_URL =
+  (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/^http/, 'ws') +
+  '/ws/call';
+
+const CAPTURE_SAMPLE_RATE = 16000; // لازم يطابق CALL_SAMPLE_RATE في routes.py
+const PLAYBACK_SAMPLE_RATE = 24000; // نفس sample rate صوت Gemini TTS الراجع
+const CAPTURE_CHUNK_SAMPLES = 2048; // ~128ms عند 16kHz قبل ما نبعت للسيرفر
+
+// كود الـ AudioWorklet بيتحمّل كـ Blob module - بيجمع عينات الصوت الخام
+// (Float32) لحد ما يوصل لحجم chunk معقول، يحولها Int16 PCM، ويبعتها
+// للـ main thread عبر postMessage.
+const CAPTURE_WORKLET_CODE = `
+class CaptureProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this._chunks = [];
+    this._bufferedSamples = 0;
+    this._targetSamples = ${CAPTURE_CHUNK_SAMPLES};
+  }
+
+  process(inputs) {
+    const input = inputs[0];
+    if (input && input[0]) {
+      const channelData = input[0];
+      this._chunks.push(new Float32Array(channelData));
+      this._bufferedSamples += channelData.length;
+
+      if (this._bufferedSamples >= this._targetSamples) {
+        const merged = new Float32Array(this._bufferedSamples);
+        let offset = 0;
+        for (const chunk of this._chunks) {
+          merged.set(chunk, offset);
+          offset += chunk.length;
+        }
+
+        const int16 = new Int16Array(merged.length);
+        for (let i = 0; i < merged.length; i++) {
+          const s = Math.max(-1, Math.min(1, merged[i]));
+          int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        }
+
+        this.port.postMessage(int16.buffer, [int16.buffer]);
+        this._chunks = [];
+        this._bufferedSamples = 0;
+      }
+    }
+    return true;
   }
 }
-
-/** Colour accent for the mic / status ring */
-function ringColor(status: CallStatus): string {
-  switch (status) {
-    case 'listening':  return 'ring-red-400 shadow-red-300';
-    case 'speaking':   return 'ring-gold-400 shadow-gold-200';
-    case 'processing': return 'ring-church-400 shadow-church-200';
-    default:           return 'ring-church-300 shadow-church-100';
-  }
-}
+registerProcessor('capture-processor', CaptureProcessor);
+`;
 
 /**
- * Full-screen overlay for the real-time voice call.
+ * Manages a WebSocket-based real-time voice call with the assistant.
  *
- * Layout:
- *   - Avatar + animated equalizer when assistant is speaking
- *   - Status label
- *   - Transcript / answer preview
- *   - Mic mute toggle + hang-up buttons
+ * الفكرة: زرار واحد بس (ابدأ/إنهاء مكالمة). المايك بيفضل فاتح طول
+ * المكالمة، والسيرفر هو اللي بيكتشف لما المستخدم يتكلم ولما يسكت
+ * (VAD)، فمفيش أي زرار تاني للمستخدم يدوسه بين الجمل - مكالمة طبيعية.
+ *
+ * لو المستخدم بدأ يتكلم والمساعد لسه بيتكلم، السيرفر بيبعت "interrupted"
+ * فورًا، وإحنا بنوقف أي صوت شغال محليًا في نفس اللحظة (barge-in).
  */
-export function CallModal({ onClose, onTranscript, onAnswer }: CallModalProps) {
-  const handleAnswer = useCallback(
-    (text: string) => {
-      onAnswer(text);
-    },
-    [onAnswer]
-  );
+export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallReturn {
+  const [status, setStatus] = useState<CallStatus>('idle');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isMicMuted, setIsMicMuted] = useState(false);
 
-  const { status, startCall, endCall, toggleMic, isMicMuted, errorMsg } = useCall({
-    onTranscript,
-    onAnswer: handleAnswer,
-  });
+  const wsRef = useRef<WebSocket | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const captureContextRef = useRef<AudioContext | null>(null);
+  const captureNodeRef = useRef<AudioWorkletNode | null>(null);
+  const isMicMutedRef = useRef(false); // نسخة sync عشان نقراها جوه callback الـ worklet
 
-  // بدء المكالمة فور فتح المودال + إنهاؤها لو المودال اتقفل من مكان تاني
-  // ملحوظة: الـ deps array فاضلة عن قصد - startCall/endCall بيتعملهم
-  // useCallback بس بيتغيروا مع كل render، وحطهم هنا هيفتح اتصال جديد
-  // في كل مرة الكومبوننت بيعمل re-render.
-  useEffect(() => {
-    startCall();
-    return () => {
-      endCall();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const playbackContextRef = useRef<AudioContext | null>(null);
+  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const nextStartTimeRef = useRef(0);
+
+  /** بتوقف أي صوت شغال أو متجدول للمساعد فورًا (استخدامها الأساسي: barge-in) */
+  const stopPlayback = useCallback(() => {
+    for (const source of activeSourcesRef.current) {
+      try {
+        source.stop();
+      } catch {
+        // ممكن يكون خلص أصلاً - نتجاهل
+      }
+    }
+    activeSourcesRef.current = [];
+
+    if (playbackContextRef.current) {
+      nextStartTimeRef.current = playbackContextRef.current.currentTime;
+    }
   }, []);
 
-  const handleHangUp = () => {
-    endCall();
-    onClose();
-  };
+  /** بتاخد شريحة صوت PCM16 خام (24kHz) وتضيفها لطابور التشغيل المتصل */
+  const scheduleAudioChunk = useCallback((buffer: ArrayBuffer) => {
+    const playbackContext = playbackContextRef.current;
+    if (!playbackContext) return;
 
-  const isActive = status !== 'idle' && status !== 'error';
-  const isListening = status === 'listening';
-  const isSpeaking = status === 'speaking';
+    const int16 = new Int16Array(buffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7fff);
+    }
 
-  return (
-    <div className="fixed inset-0 z-50 bg-church-900/95 backdrop-blur-md flex flex-col items-center justify-between py-16 px-8 animate-fade-in">
+    const audioBuffer = playbackContext.createBuffer(
+      1,
+      float32.length,
+      PLAYBACK_SAMPLE_RATE
+    );
+    audioBuffer.copyToChannel(float32, 0);
 
-      {/* Top: subtle cross decoration */}
-      <div className="text-gold-500/30 text-4xl select-none">✝</div>
+    const source = playbackContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(playbackContext.destination);
 
-      {/* Center: avatar + waveform */}
-      <div className="flex flex-col items-center gap-6">
-        {/* Avatar with animated ring */}
-        <div
-          className={`
-            rounded-full p-1 ring-4 transition-all duration-500 shadow-lg
-            ${ringColor(status)}
-          `}
-        >
-          <AssistantAvatar size="lg" />
-        </div>
+    const startTime = Math.max(playbackContext.currentTime, nextStartTimeRef.current);
+    source.start(startTime);
+    nextStartTimeRef.current = startTime + audioBuffer.duration;
 
-        {/* Animated equalizer bars when speaking */}
-        {isSpeaking && (
-          <div className="flex items-end gap-1 h-8">
-            {[1, 2, 3, 4, 5].map((i) => (
-              <span
-                key={i}
-                className="w-1.5 bg-gold-400 rounded-full animate-bounce-dot"
-                style={{
-                  height: `${12 + i * 4}px`,
-                  animationDelay: `${i * 0.12}s`,
-                }}
-              />
-            ))}
-          </div>
-        )}
+    activeSourcesRef.current.push(source);
+    source.onended = () => {
+      activeSourcesRef.current = activeSourcesRef.current.filter((s) => s !== source);
+    };
+  }, []);
 
-        {/* Microphone pulse when listening */}
-        {isListening && (
-          <div className="relative flex items-center justify-center">
-            <span className="absolute w-16 h-16 rounded-full bg-red-500/20 animate-ping" />
-            <MdGraphicEq className="text-red-400 text-3xl relative z-10" />
-          </div>
-        )}
+  /** بتفتح المايك وتبدأ بث الصوت الخام للسيرفر بشكل مستمر */
+  const startMicStreaming = useCallback(async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    streamRef.current = stream;
 
-        {/* Status label */}
-        <p className="text-gold-300 font-arabic text-lg font-medium tracking-wide">
-          {statusLabel(status)}
-        </p>
+    const captureContext = new AudioContext({ sampleRate: CAPTURE_SAMPLE_RATE });
+    captureContextRef.current = captureContext;
 
-        {/* Error message */}
-        {errorMsg && (
-          <p className="text-red-400 font-arabic text-sm text-center max-w-xs">
-            {errorMsg}
-          </p>
-        )}
+    // تشخيص مؤقت: نتأكد إن المتصفح فعلاً بيسجل بـ 16000Hz زي المفروض.
+    // لو الرقم ده مختلف، ده سبب محتمل قوي للتشويش في الترانسكريبت.
+    console.log('Actual capture sample rate:', captureContext.sampleRate);
 
-        {/* Assistant name */}
-        <p className="text-church-400 font-arabic text-sm">شنودة</p>
-      </div>
+    const workletBlob = new Blob([CAPTURE_WORKLET_CODE], {
+      type: 'application/javascript',
+    });
+    const workletUrl = URL.createObjectURL(workletBlob);
+    await captureContext.audioWorklet.addModule(workletUrl);
+    URL.revokeObjectURL(workletUrl);
 
-      {/* Bottom: call controls */}
-      <div className="flex items-center gap-8">
-        {/* Mute / unmute mic */}
-        <button
-          onClick={toggleMic}
-          disabled={!isActive}
-          title={isMicMuted ? 'تشغيل الميكروفون' : 'إيقاف الميكروفون مؤقتاً'}
-          className={`
-            w-14 h-14 rounded-full flex items-center justify-center transition-all shadow-lg
-            ${!isMicMuted
-              ? 'bg-white/10 text-white hover:bg-white/20'
-              : 'bg-white/5 text-church-400 hover:bg-white/10'
-            }
-            disabled:opacity-30 disabled:cursor-not-allowed
-          `}
-        >
-          {!isMicMuted ? (
-            <FaMicrophone className="text-xl text-red-400" />
-          ) : (
-            <FaMicrophoneSlash className="text-xl" />
-          )}
-        </button>
+    const micSource = captureContext.createMediaStreamSource(stream);
+    const captureNode = new AudioWorkletNode(captureContext, 'capture-processor');
+    captureNodeRef.current = captureNode;
 
-        {/* Hang up */}
-        <button
-          onClick={handleHangUp}
-          title="إنهاء المكالمة"
-          className="w-16 h-16 rounded-full bg-red-500 hover:bg-red-600 text-white flex items-center justify-center shadow-xl transition-colors"
-        >
-          <FaPhoneSlash className="text-2xl" />
-        </button>
-      </div>
-    </div>
-  );
-}
+    captureNode.port.onmessage = (event: MessageEvent<ArrayBuffer>) => {
+      if (isMicMutedRef.current) return;
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(event.data);
+      }
+    };
 
-/**
- * Call trigger button shown in the Navbar / chat area.
- * Accepts an onClick that opens the CallModal.
- */
-interface CallButtonProps {
-  onClick: () => void;
-  isActive: boolean;
-}
+    // لازم نوصّل الـ node لمخرج (حتى لو صامت) عشان المتصفح يستمر
+    // ينادي process() بانتظام
+    const silentGain = captureContext.createGain();
+    silentGain.gain.value = 0;
 
-export function CallButton({ onClick, isActive }: CallButtonProps) {
-  return (
-    <button
-      onClick={onClick}
-      title={isActive ? 'مكالمة جارية' : 'بدء مكالمة'}
-      className={`
-        w-11 h-11 rounded-full flex items-center justify-center transition-all shadow
-        ${isActive
-          ? 'bg-green-500 text-white animate-pulse'
-          : 'bg-church-700 hover:bg-church-600 text-gold-300 hover:text-gold-200'
+    micSource.connect(captureNode);
+    captureNode.connect(silentGain);
+    silentGain.connect(captureContext.destination);
+  }, []);
+
+  const startCall = useCallback(async () => {
+    setErrorMsg(null);
+    setStatus('connecting');
+    isMicMutedRef.current = false;
+    setIsMicMuted(false);
+
+    try {
+      const ws = new WebSocket(WS_URL);
+      ws.binaryType = 'arraybuffer';
+      wsRef.current = ws;
+
+      ws.onopen = async () => {
+        try {
+          playbackContextRef.current = new AudioContext({
+            sampleRate: PLAYBACK_SAMPLE_RATE,
+          });
+          console.log("Before resume:", playbackContextRef.current.state);
+
+          await playbackContextRef.current.resume();
+
+          console.log("After resume:", playbackContextRef.current.state);
+          nextStartTimeRef.current = 0;
+
+          await startMicStreaming();
+          setStatus('listening');
+        } catch {
+          setErrorMsg('لا يمكن الوصول إلى الميكروفون.');
+          setStatus('error');
         }
-      `}
-    >
-      <FaMicrophone className="text-sm" />
-    </button>
-  );
+      };
+
+      ws.onmessage = (event: MessageEvent) => {
+        if (typeof event.data === 'string') {
+          const msg = JSON.parse(event.data);
+
+          switch (msg.type) {
+            case 'interrupted':
+              // المستخدم بدأ يتكلم - أوقفي أي صوت شغال فورًا (barge-in)
+              stopPlayback();
+              setStatus('listening');
+              break;
+
+            case 'processing':
+              setStatus('processing');
+              break;
+
+            case 'transcript':
+              onTranscript(msg.text as string);
+              break;
+
+            case 'answer_text':
+              onAnswer(msg.text as string);
+              break;
+
+            case 'answer_audio_start':
+              setStatus('speaking');
+              break;
+
+            case 'answer_audio_end':
+              setStatus('listening');
+              break;
+
+            case 'error':
+              setErrorMsg(msg.message as string);
+              setStatus('error');
+              break;
+          }
+        } else {
+          // شريحة صوت PCM خام (ArrayBuffer) من رد المساعد
+          console.log("Audio", event.data.byteLength);
+          scheduleAudioChunk(event.data as ArrayBuffer);
+          
+        }
+      };
+
+      ws.onerror = () => {
+        setErrorMsg('تعذر الاتصال بالخادم.');
+        setStatus('error');
+      };
+
+      ws.onclose = () => {
+        setStatus((prev) => (prev === 'idle' ? prev : 'idle'));
+      };
+    } catch {
+      setErrorMsg('تعذر بدء المكالمة.');
+      setStatus('error');
+    }
+  }, [onTranscript, onAnswer, scheduleAudioChunk, startMicStreaming, stopPlayback]);
+
+  const endCall = useCallback(() => {
+    stopPlayback();
+
+    captureNodeRef.current?.disconnect();
+    captureNodeRef.current = null;
+
+    captureContextRef.current?.close();
+    captureContextRef.current = null;
+
+    playbackContextRef.current?.close();
+    playbackContextRef.current = null;
+
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+
+    wsRef.current?.close();
+    wsRef.current = null;
+
+    setStatus('idle');
+    setErrorMsg(null);
+    setIsMicMuted(false);
+    isMicMutedRef.current = false;
+  }, [stopPlayback]);
+
+  /** كتم/إلغاء كتم المايك - المكالمة والاستماع فاضلين شغالين، بس السيرفر
+   *  مش هيستقبل صوت المستخدم لحد ما يلغي الكتم */
+  const toggleMic = useCallback(() => {
+    isMicMutedRef.current = !isMicMutedRef.current;
+    setIsMicMuted(isMicMutedRef.current);
+
+    // نبلّغ السيرفر فورًا لما نعمل Mute، عشان يمسح أي كلام متجمع لسه
+    // ماخلصش بدل ما يستنى سكوت مش هيجي أصلاً (لإننا وقفنا بعت الصوت
+    // خالص) - وده اللي كان بيخلي الرد يتأخر ويطلع بعد الـ Unmute
+    if (isMicMutedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'mic_muted' }));
+    }
+  }, []);
+
+  return {
+    status,
+    startCall,
+    endCall,
+    toggleMic,
+    isMicMuted,
+    isCallActive: status !== 'idle',
+    errorMsg,
+  };
 }
