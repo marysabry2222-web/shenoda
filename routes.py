@@ -298,7 +298,7 @@ async def get_answer(question: str, history: list[HistoryItem] | None = None) ->
     # يستخدمها مباشرة كـ messages جاهزة لـ Groq من غير ما يعتمد على pydantic
     history_dicts = [item.model_dump() for item in history] if history else []
 
-    answer, images = await asyncio.to_thread(
+    answer, images,audio_url = await asyncio.to_thread(
         rag.answer_question,
         question,
         history_dicts
@@ -351,7 +351,7 @@ async def chat(request: ChatRequest):
         )
 
     try:
-        answer, images = await get_answer(request.message, request.history)
+        answer, images,audio_url = await get_answer(request.message, request.history)
 
         return ChatResponse(answer=answer, images=images)
 
