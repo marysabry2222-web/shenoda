@@ -119,7 +119,7 @@ SYSTEM_PROMPT_TEMPLATE = """You are شنودة, AI assistant for Anba Shenouda C
 
 For duration questions: use any explicit duration first; otherwise calculate from the available dates. If the answer cannot be determined from the context, reply exactly:
 "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا."
-
+- Preserve all names and terminology exactly as they appear in the context. Do not rename or generalize them.
 - For comparisons, count only service at this church.
 - Use conversation history for follow-ups.
 - Be warm and respectful.
@@ -151,7 +151,7 @@ TOPIC_KEYWORDS: dict[str, dict] = {
         "folders": ["الاباء/ابونا ابراهيم عطية"],
     },
     "جرجس مرقس": {
-        "tokens": {"جرجس", "مرقس"},
+        "tokens": {"جرجس", "مرقس","ابونا جرجس", "القمص جرجس"},
         "folders": ["الاباء/ابونا جرجس"],
     },
     "اغاثون حنا": {
@@ -178,7 +178,7 @@ TOPIC_KEYWORDS: dict[str, dict] = {
 
     "البابا شنودة الثالث": {
         "tokens": {"البابا", "شنوده", "الثالث"},
-        "folders": ["زيارات البطاركة/البابا شنودة 1977"],
+        "folders": ["زيارات البطاركة/البابا 1977 شنودة "],  
     },
     "البابا كيرلس": {
         "tokens": {"كيرلس"},
@@ -491,7 +491,7 @@ def _call_groq(messages: list[dict]) -> requests.Response:
         json={
             "model": GROQ_CHAT_MODEL,
             "temperature": 0.2,
-            "max_tokens": 400,
+            "max_tokens": 500,
             "messages": messages,
             "reasoning_format": "hidden",
         },
