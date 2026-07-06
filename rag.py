@@ -11,8 +11,8 @@ import requests
 from config import (
     CHUNKS_PATH,
     GROQ_API_KEY,
-    GROQ_CHAT_MODEL,
     TOP_K,
+    CEREBRAS_API_KEY,
 )
 
 _chunks: list[str] = []
@@ -481,22 +481,126 @@ def _build_messages(question: str, context: str, history: list[dict] | None) -> 
     return messages
 
 
-def _call_groq(messages: list[dict]) -> requests.Response:
+# =========================
+# مزوّدين مختلفين للـ LLM: Cerebras (أساسي) و Groq (fallback)
+# =========================
+# ليه Cerebras أساسي: حد التوكنز في الدقيقة (TPM) عندهم أعلى بكتير من
+# Groq (30,000 مقابل 6,000)، فبيتحمّل الـ context الكبير اللي بنبعته
+# من غير ما يضرب rate limit كل شوية. في المقابل، حد الطلبات في الدقيقة
+# (RPM) عندهم أقل (5 بس) - فلو حصل ضغط طلبات فجأة (كذا مستخدم في نفس
+# اللحظة)، ده هو اللي المفروض يضرب الحد مش التوكنز.
+CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
+CEREBRAS_CHAT_MODEL = "gpt-oss-120b"
+
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+# fallback لو Cerebras فشل في كل محاولاته (rate limit مستمر أو مشكلة
+# تانية) - حل أخير قبل ما نرجع رسالة الفولباك النهائية للمستخدم.
+GROQ_FALLBACK_MODEL = "llama-3.3-70b-versatile"
+
+MAX_RETRIES_PRIMARY = MAX_RETRIES
+# عدد محاولات الـ fallback - أقل من الأساسي لأنه أصلاً حل أخير، مش
+# عايزين نضيّع وقت طويل عليه لو هو كمان فاشل
+FALLBACK_MAX_RETRIES = 1
+
+
+def _call_chat_completions(
+    messages: list[dict],
+    url: str,
+    api_key: str,
+    model: str,
+) -> requests.Response:
+    payload = {
+        "model": model,
+        "temperature": 0.2,
+        "max_tokens": 500,
+        "messages": messages,
+    }
+
+    model_lower = model.lower()
+
+    if "qwen" in model_lower:
+        # qwen3 بيدعم "none" فعليًا لقفل التفكير تمامًا - ده أرخص خيار
+        payload["reasoning_effort"] = "none"
+        payload["reasoning_format"] = "hidden"
+    elif "gpt-oss" in model_lower:
+        # gpt-oss (سواء على Cerebras أو Groq) بيدعم بس low/medium/high -
+        # "none" مش قيمة مسموحة ليه (على عكس qwen3) وهترجع 400 لو
+        # اتبعتت. "low" هو أقل استهلاك توكنز ممكن مع الحفاظ على جودة
+        # معقولة للرد.
+        payload["reasoning_effort"] = "low"
+        # reasoning_format حاجة خاصة بـ Groq بس (مش موجودة في توثيق
+        # Cerebras) - نضيفها بس لو الطلب فعليًا رايح لـ Groq
+        if "groq.com" in url:
+            payload["reasoning_format"] = "hidden"
+
     return requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
+        url,
         headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
-        json={
-            "model": GROQ_CHAT_MODEL,
-            "temperature": 0.2,
-            "max_tokens": 500,
-            "messages": messages,
-            "reasoning_format": "none",
-        },
+        json=payload,
         timeout=60,
     )
+
+
+def _attempt_completion(
+    messages: list[dict],
+    url: str,
+    api_key: str,
+    model: str,
+    max_retries: int,
+) -> requests.Response | None:
+    """بتحاول تاخد رد ناجح (status 200) من مزوّد/موديل معين، بمحاولات
+    retry لكل من: مشاكل الشبكة، rate limit (429)، وأخطاء السيرفر (5xx).
+
+    بترجع الـ response عند النجاح، أو None لو كل المحاولات المسموحة
+    (max_retries + 1) فشلت - عشان اللي بينده الدالة (answer_question)
+    يقرر يجرب مزوّد تاني (fallback) أو يرجع رسالة الفولباك النهائية.
+
+    ملحوظة: أخطاء 400 (زي طلب مكوّن غلط) بتترفع فورًا من غير أي retry -
+    إعادة نفس الطلب الغلط هتفشل تاني بنفس الشكل، فمفيش فايدة من الانتظار."""
+    for attempt in range(max_retries + 1):
+        is_last_attempt = attempt == max_retries
+
+        try:
+            resp = _call_chat_completions(messages, url, api_key, model)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            print(f"[{model}] NETWORK ERROR (attempt {attempt + 1}/{max_retries + 1}): {exc}")
+            if is_last_attempt:
+                return None
+            time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
+            continue
+        except requests.exceptions.RequestException as exc:
+            print(f"[{model}] UNEXPECTED REQUEST ERROR (attempt {attempt + 1}/{max_retries + 1}): {exc}")
+            if is_last_attempt:
+                return None
+            time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
+            continue
+
+        print(f"[{model}] STATUS:", resp.status_code)
+        print(f"[{model}] BODY:", resp.text)
+
+        if resp.status_code == 429:
+            if is_last_attempt:
+                return None
+            wait_seconds = _extract_retry_seconds(resp)
+            print(f"[{model}] RATE LIMITED — waiting {wait_seconds}s before retry")
+            time.sleep(wait_seconds)
+            continue
+
+        if resp.status_code >= 500:
+            if is_last_attempt:
+                return None
+            time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
+            continue
+
+        # أي خطأ 4xx تاني (زي 400 Bad Request) مش هيتصلح بإعادة نفس
+        # الطلب - نرفعه فورًا بدل ما نضيّع وقت في retries هتفشل برضه
+        resp.raise_for_status()
+        return resp
+
+    return None
 
 
 def answer_question(question: str, history: list[dict] | None = None) -> tuple[str, list[str]]:
@@ -504,52 +608,44 @@ def answer_question(question: str, history: list[dict] | None = None) -> tuple[s
     print("CONTEXT LENGTH (chars):", len(context))
     messages = _build_messages(question, context, history)
 
-    for attempt in range(MAX_RETRIES + 1):
-        is_last_attempt = attempt == MAX_RETRIES
+    # المحاولة الأساسية: Cerebras (gpt-oss-120b) بكل محاولات إعادة
+    # المحاولة العادية (MAX_RETRIES_PRIMARY)
+    try:
+        resp = _attempt_completion(
+            messages, CEREBRAS_URL, CEREBRAS_API_KEY, CEREBRAS_CHAT_MODEL, MAX_RETRIES_PRIMARY
+        )
+    except requests.exceptions.HTTPError as exc:
+        print(f"[{CEREBRAS_CHAT_MODEL}] Bad request (not retrying): {exc}")
+        resp = None
 
+    # لو فشلت كل محاولات Cerebras (rate limit مستمر، أو bad request، أو
+    # أي مشكلة تانية)، نجرب حل أخير: Groq (Llama)
+    if resp is None:
+        print(
+            f"{CEREBRAS_CHAT_MODEL} (Cerebras) failed - "
+            f"trying fallback model {GROQ_FALLBACK_MODEL} (Groq)"
+        )
         try:
-            resp = _call_groq(messages)
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-            print(f"NETWORK ERROR (attempt {attempt + 1}/{MAX_RETRIES + 1}): {exc}")
-            if is_last_attempt:
-                return FALLBACK_MESSAGE, []
-            time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
-            continue
-        except requests.exceptions.RequestException as exc:
-            print(f"UNEXPECTED REQUEST ERROR (attempt {attempt + 1}/{MAX_RETRIES + 1}): {exc}")
-            if is_last_attempt:
-                return FALLBACK_MESSAGE, []
-            time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
-            continue
+            resp = _attempt_completion(
+                messages, GROQ_URL, GROQ_API_KEY, GROQ_FALLBACK_MODEL, FALLBACK_MAX_RETRIES
+            )
+        except requests.exceptions.HTTPError as exc:
+            print(f"[{GROQ_FALLBACK_MODEL}] Bad request (not retrying): {exc}")
+            resp = None
 
-        print("STATUS:", resp.status_code)
-        print("BODY:", resp.text)
+    # لو الاتنين فشلوا، مفيش حاجة تانية نعملها - رسالة الفولباك النهائية
+    if resp is None:
+        return FALLBACK_MESSAGE, []
 
-        if resp.status_code == 429:
-            if is_last_attempt:
-                return FALLBACK_MESSAGE, []
-            wait_seconds = _extract_retry_seconds(resp)
-            print(f"RATE LIMITED — waiting {wait_seconds}s before retry")
-            time.sleep(wait_seconds)
-            continue
+    answer = resp.json()["choices"][0]["message"]["content"].strip()
 
-        if resp.status_code >= 500:
-            if is_last_attempt:
-                return FALLBACK_MESSAGE, []
-            time.sleep(NETWORK_ERROR_BASE_DELAY * (2 ** attempt))
-            continue
+    # تنضيف أي تفكير داخلي (<think>...) قبل استخدام الرد أو فحصه - آمن
+    # حتى لو الرد جه من Llama (مش موديل reasoning، فمش هيفرق حاجة)
+    answer = _strip_thinking(answer)
 
-        resp.raise_for_status()
+    if _has_language_leak(answer):
+        print("LANGUAGE LEAK DETECTED (not retrying, logged for monitoring):", answer[:150])
 
-        answer = resp.json()["choices"][0]["message"]["content"].strip()
+    images = _detect_priest_images(question, answer, history)
 
-        answer = _strip_thinking(answer)
-
-        if _has_language_leak(answer):
-            print("LANGUAGE LEAK DETECTED (not retrying, logged for monitoring):", answer[:150])
-
-        images = _detect_priest_images(question, answer, history)
-
-        return answer, images
-
-    return FALLBACK_MESSAGE, []
+    return answer, images
