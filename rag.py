@@ -108,9 +108,28 @@ def _build_retrieval_query(question: str, history: list[dict] | None) -> str:
     return " ".join(parts)
 
 
+# كلمات بتدل إن السؤال "مقارنة" بين كذا كاهن مع بعض (مش سؤال عن شخص
+# واحد بعينه) - زي "مين أكتر كاهن خدم؟" BM25 بتفشل في الأسئلة دي لأنها
+# بتفضّل أي chunk فيه كلمة السؤال حرفيًا (زي "خدم") على chunks تانية
+# بمعنى مماثل لكن صياغة مختلفة (زي تاريخ رسامة من غير كلمة "خدم" جنبه) -
+# فبعض الكهنة بيتسقطوا من المقارنة غلط. الحل: للأسئلة دي بس، نتجاوز
+# BM25 ونبعت كل الـ chunks عشان المقارنة تبقى عادلة ومكتملة.
+COMPARISON_TRIGGER_WORDS = {"اكتر", "أكتر", "أكثر", "اطول", "أطول", "افضل", "أفضل"}
+
+
+def _is_comparison_question(question: str) -> bool:
+    return bool(set(_tokenize(question)) & COMPARISON_TRIGGER_WORDS)
+
+
 def _retrieve_context(question: str, history: list[dict] | None = None, top_k: int = TOP_K) -> str:
     """بترجع أقرب top_k chunks بس (مش كل الـ 11) - بحث واعي بسياق
-    المحادثة، مش بس بكلمات السؤال الحالي لوحدها."""
+    المحادثة، مش بس بكلمات السؤال الحالي لوحدها.
+
+    استثناء: أسئلة المقارنة ("مين أكتر...") بتاخد كل الـ chunks كاملة
+    من غير أي فلترة، عشان المقارنة تبقى عادلة (شوفي الكومنت فوق)."""
+    if _is_comparison_question(question):
+        return "\n\n---\n\n".join(_chunks)
+
     if not _chunk_token_lists:
         _build_bm25_index()
 
