@@ -106,49 +106,16 @@ def _retrieve_context(question: str, history: list[dict] | None = None, top_k: i
     return "\n\n---\n\n".join(selected)
 
 
-# ملحوظة: السطر ده بيستخدم SYSTEM_PROMPT_TEMPLATE.format(today=...) تحت في
-# _system_prompt() - لو استخدمتي SYSTEM_PROMPT مباشرة من غير format()،
-# النص "{today}" هيفضل زي ما هو حرفيًا في البرومبت وده باج (الموديل
-# هيشوف كلمة {today} غريبة بدل التاريخ الفعلي).
-# SYSTEM_PROMPT_TEMPLATE = """You are شنودة, an AI assistant for Anba Shenouda Church in Alexandria, Egypt.
-# Today's real date is: {today}
-
-# - If asked who you are, say: "أنا شنودة، مساعد ذكي خاص بكنيسة الأنبا شنودة."
-# - Answer ONLY in Arabic. Every word must be Arabic - not even a single foreign word or letter, including connector words.
-# - Answer ONLY using facts from the provided context. Never invent information that isn't in the context.
-# - Do NOT show your reasoning, thinking process, or any <think> tags. Output ONLY the final answer text in Arabic, nothing else.
-
-# Duration / "مدة" questions — follow this priority order strictly:
-# 1. If the context EXPLICITLY states a total duration or number of years (e.g. "خدم 35 سنة كهنوت"), use that
-#    exact stated number as-is. Do NOT recalculate it yourself from dates, even if you also see an ordination
-#    date in the context - the explicitly stated number is always correct and takes priority over any calculation.
-# 2. Otherwise, calculate the duration as (end point) minus (ordination/start date), where the end point is
-#    whichever of these actually applies to that person, based on the context:
-#    - their death/تنيّح date, if the context says they passed away
-#    - the date they left/traveled away to serve elsewhere, if the context says they left this church
-#    - today's real date ({today}), only if the context gives no indication they left or passed away (i.e.
-#      they are still currently serving here)
-# 3. If the person left, traveled away, or passed away, and the context gives NEITHER an explicit total-duration
-#    number NOR any usable end date (death date / travel date), do NOT guess or calculate anything - say exactly:
-#    "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا."
-# 4. When comparing several priests (e.g. "أكتر كاهن خدم الكنيسة"), only count each priest's time actually
-#    serving THIS church specifically - if someone left to serve elsewhere for a period, don't count that time
-#    away, even if they later came back (use the periods actually spent at this church only).
-
-# - If a follow-up question refers to something discussed earlier in the conversation, use the conversation
-#   history to understand what is being asked, and apply the same rules above.
-# - If the underlying fact itself is not in the context at all, say exactly:
-#   "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا."
-# - Never claim to be a priest or bishop.
-# - Never mention embeddings, FAISS, chunks, or retrieval.
-# - Be warm, respectful, and natural.
-# """
 SYSTEM_PROMPT_TEMPLATE = """You are شنودة, AI assistant for Anba Shenouda Church, Alexandria. Today: {today}
 
 - Identity: "أنا شنودة، مساعد ذكي خاص بكنيسة الأنبا شنودة."
 - Arabic only.
 - Answer only from the provided context.
 - Never invent facts or reveal reasoning (<think>).
+- Keep answers concise and proportional to the question: answer exactly what was asked, no more.
+  A short/specific question ("مين أبونا مينا") gets a short answer (2-3 sentences).
+  Only give a longer, fuller answer when the question explicitly asks for a full story/detailed
+  account (e.g. "احكيلي قصة الكنيسة كاملة"). Do not pad answers with unrequested extra background.
 
 For duration questions: use any explicit duration first; otherwise calculate from the available dates. If the answer cannot be determined from the context, reply exactly:
 "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا."
@@ -170,14 +137,10 @@ FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، مم
 MAX_RETRIES = 3
 NETWORK_ERROR_BASE_DELAY = 2
 
-MAX_HISTORY_MESSAGES = 4
+# قللناها من 4 لـ 3 - عدد رسايل الهيستوري اللي بتتبعت كسياق محادثة
+# كامل لـ Groq (منفصل عن RETRIEVAL_HISTORY_WINDOW اللي لتحسين البحث بس)
+MAX_HISTORY_MESSAGES = 3
 
-# كل موضوع/شخص ليه مجموعة "كلمات مفتاحية" (مش اسم كامل متصل) - لازم كل
-# الكلمات دي تكون موجودة كـ token مستقل في النص (مش شرط جنب بعض)، عشان:
-# 1) أسئلة قصيرة زي "ابونا مينا" (من غير "زكي سليمان") لسه تتطابق
-# 2) ردود فيها كلمة زيادة جوه الاسم (زي "أبونا القس مينا...") لسه تتطابق
-# 3) أسماء ملتبسة زي "جرجس" (موجودة في "جرجس مرقس" وكمان في اسم "ويصا
-#    القمص جرجس" نفسه) بنطلب أكتر من كلمة مع بعض عشان نفرّق بينهم
 TOPIC_KEYWORDS: dict[str, dict] = {
     "شنودة دوس": {
         "tokens": {"شنوده", "دوس"},
@@ -209,10 +172,6 @@ TOPIC_KEYWORDS: dict[str, dict] = {
     },
     "جميع الكهنة": {
         "tokens": set(),
-        # بتتفعّل بس لما السؤال/الرد يتكلم عن الكهنة كمجموعة عمومًا
-        # (زي "أكتر كاهن خدم" أو "كهنة الكنيسة")، مش عن شخص واحد بعينه.
-        # لإن "tokens" فاضية، ده بيخليها دايمًا آخر أولوية (شوفي الترتيب
-        # في _match_topic) - أي تطابق باسم كاهن معين بيتغلّب عليها.
         "any_tokens": {"كهنه", "الكهنه", "قمامصه", "القمامصه", "كاهن", "الكاهن"},
         "folders": ["الاباء/جميع الكهنة"],
     },
@@ -223,7 +182,7 @@ TOPIC_KEYWORDS: dict[str, dict] = {
     },
     "البابا كيرلس": {
         "tokens": {"كيرلس"},
-        "folders": ["زيارات البطاركة/البابا كيرلس 1960"],
+        "folders": ["زيارات البطاركة/1960البابا كيرلس"],
     },
     "البابا تواضروس": {
         "tokens": {"تواضروس"},
@@ -236,7 +195,7 @@ TOPIC_KEYWORDS: dict[str, dict] = {
     },
 
     "تعمير/نشأة/تاريخ الكنيسة": {
-        "tokens": set(),  # بيتفحص بمنطق تاني (أي كلمة من اللي تحت)، شوفي التعليق تحت
+        "tokens": set(),
         "any_tokens": {
             "نشاه", "تعمير", "بناء", "تاسيس", "قصه", "تاريخ", "حكايه", "القديمه",
         },
@@ -263,8 +222,7 @@ def _topic_matches(topic: dict, tokens: set[str]) -> bool:
         return True
     return False
 
-# بدل رقم ثابت (2)، بنبعت مدى: على الأقل حاولي MIN، وبحد أقصى MAX - وده
-# بيعتمد على قد ايه صور فعليًا موجودة في الفولدر(ات) المطابقة
+
 MIN_IMAGES_PER_ANSWER = 2
 MAX_IMAGES_PER_ANSWER = 5
 
@@ -297,6 +255,23 @@ def _load_assets_json():
     total_images = sum(len(v) for v in grouped.values())
     print(f"ASSETS: تم تحميل {total_images} صورة عبر {len(grouped)} مجلد من {ASSETS_JSON_PATH}")
 
+    # طباعة توضيحية: كل أسماء الفولدرات الموجودة فعليًا في assets.json،
+    # عشان نقدر نقارنها بسهولة مع الأسماء المكتوبة في TOPIC_KEYWORDS
+    # ونمسك أي فرق بسيط في الاسم (زي "البابا كيرلس 1960" مقابل الاسم
+    # الحقيقي) هو اللي بيسبب available=0 في اللوج.
+    print("ASSETS: أسماء الفولدرات المتاحة فعليًا:")
+    for folder_name in sorted(grouped.keys()):
+        print(f"   - '{folder_name}' ({len(grouped[folder_name])} صورة)")
+
+    # تحذير مبكر: أي فولدر مكتوب في TOPIC_KEYWORDS لكنه مش موجود فعليًا
+    # في assets.json - يعني أي سؤال يطابق الموضوع ده هيرجع صفر صور دايمًا
+    known_folders = {f for topic in TOPIC_KEYWORDS.values() for f in topic["folders"]}
+    missing = known_folders - set(grouped.keys())
+    if missing:
+        print("⚠️  ASSETS WARNING: الفولدرات دي مكتوبة في TOPIC_KEYWORDS بس مش موجودة في assets.json (هترجع صفر صور دايمًا):")
+        for name in sorted(missing):
+            print(f"   ✗ '{name}'")
+
 
 def _normalize_arabic(text: str) -> str:
     text = re.sub(r"[إأآا]", "ا", text)
@@ -308,9 +283,6 @@ def _normalize_arabic(text: str) -> str:
 
 def _match_topic(text: str) -> list[str] | None:
     tokens = _text_tokens(text)
-    # لو فيه أكتر من موضوع متطابق، نفضّل الأكثر تحديدًا (أكتر كلمات
-    # مفتاحية مطلوبة اتحققت) - عشان "جرجس مرقس" (كلمتين) يتفوّق على أي
-    # تطابق أعم لو حصل تعارض
     matches = [
         (len(topic.get("tokens") or []), name)
         for name, topic in TOPIC_KEYWORDS.items()
@@ -339,8 +311,6 @@ def _match_dominant_topic_in_answer(answer: str) -> list[str] | None:
         if required:
             if not required.issubset(tokens):
                 continue
-            # سكور = أقل تكرار بين الكلمات المطلوبة (يعني الاتنين لازم
-            # يتكرروا مع بعض عشان نعتبرها إشارة قوية، مش كلمة عابرة)
             score = min(token_counts[t] for t in required)
         elif any_tokens:
             matched = any_tokens & tokens
@@ -359,7 +329,6 @@ def _match_dominant_topic_in_answer(answer: str) -> list[str] | None:
     ranked = sorted(folder_scores.items(), key=lambda pair: pair[1], reverse=True)
     top_folders, top_score = ranked[0]
 
-    # لو فيه موضوع تاني بنفس التكرار الأعلى، الموقف غامض - منرفقش صور
     if len(ranked) > 1 and ranked[1][1] == top_score:
         return None
 
@@ -371,16 +340,6 @@ def _detect_topic_folders(
     answer: str,
     history: list[dict] | None = None,
 ) -> tuple[list[str] | None, str]:
-    """بترجّع (الفولدرات المطابقة أو None, مصدر المطابقة) - المصدر بس
-    عشان الطباعة/التتبع (شوفي _detect_priest_images تحت) فتقدري تشوفي
-    في اللوج مصدر القرار جه منين بالظبط: من السؤال، من رسالة سابقة في
-    المحادثة، ولا من الرد (آخر حل، شوفي التعليق تحت).
-
-    الأولوية اتغيّرت عشان "تركّز على السؤال أكتر من الإجابة": السؤال
-    نفسه هو المصدر الأدق دايمًا (المستخدم بيقول اللي عايزه بالظبط).
-    الرد ممكن يفصّل ويوسّع في كذا اسم وموضوع في نفس الوقت (خصوصًا في
-    أسئلة المقارنة زي "مين خدم أكتر")، فاستخدامه كمصدر أساسي كان
-    بيدّي نتايج ملخبطة أحيانًا. فبقى آخر حل بس، مش تاني حاجة نجربها."""
     folders = _match_topic(question)
     if folders:
         return folders, "question"
@@ -392,10 +351,6 @@ def _detect_topic_folders(
             if folders:
                 return folders, "history"
 
-    # آخر حل بس: لو السؤال نفسه ومفيش حاجة في المحادثة السابقة وضحت
-    # الموضوع، ندوّر في الرد - بس ده أضعف مصدر (ممكن يفصّل في أكتر من
-    # موضوع مع بعض) فبيتفحص بمنطق "الموضوع المسيطر" (تكرار)، ولو النتيجة
-    # غامضة بيرجع None بدل ما يخمّن
     folders = _match_dominant_topic_in_answer(answer)
     if folders:
         return folders, "answer"
@@ -408,9 +363,6 @@ def _get_images(
     min_count: int = MIN_IMAGES_PER_ANSWER,
     max_count: int = MAX_IMAGES_PER_ANSWER,
 ) -> list[str]:
-    """بتجمع روابط الصور من كل الفولدرات المطلوبة، وتسحب عشوائي منها.
-    بترجع لحد max_count لو متوفرين، أو أقل لو الفولدر فيه صور أقل من
-    كده - يعني العدد بيتغيّر حسب المتاح فعليًا، مش رقم ثابت."""
     if not _folder_to_images:
         _load_assets_json()
 
@@ -426,8 +378,6 @@ def _get_images(
     return all_urls[:count]
 
 
-# الردود دي معناها "مفيش معلومة/مفيش رد فعلي" - لو الرد طلع واحد منهم
-# بالظبط، منرفقش صور خالص، حتى لو السؤال بيتكلم عن شخص معروف عندنا صوره
 NO_INFO_ANSWERS = {
     FALLBACK_MESSAGE,
     "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا.",
@@ -451,10 +401,6 @@ def _detect_priest_images(
 
     images = _get_images(folders)
 
-    # طباعة توضيحية: بتوريكي بالظبط الفولدر(ات) اللي اتحددت ومن أنهي
-    # مصدر (سؤال/رد/هيستوري)، وعدد الصور المتاحة فعليًا فيه مقابل
-    # اللي هيتبعت - عشان تقدري تتأكدي إنه "راح" للفولدر الصح في
-    # assets.json لو فيه شك في نتيجة غريبة
     available = sum(len(_folder_to_images.get(f, [])) for f in folders)
     print(
         f"IMAGES: matched folders={folders} (source={source}) - "
@@ -499,24 +445,15 @@ def _has_language_leak(text: str) -> bool:
     return latin_count > 0 and (latin_count / len(letters)) > 0.05
 
 
-# =========================
-# تنظيف رد موديلات الـ reasoning (زي Qwen) اللي بترجع تفكيرها الداخلي
-# جوه نفس الـ content field بصيغة <think>...</think> بدل ما تفصله في
-# field منفصل. لازم نشيلها قبل ما الرد يوصل للمستخدم أو يتفحص/يتحسب.
-# =========================
 _THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 def _strip_thinking(text: str) -> str:
-    # الحالة العادية: <think>...</think> اتقفلت زي ما لازم
     cleaned = _THINK_TAG_RE.sub("", text).strip()
 
-    # الحالة الناقصة: فيه </think> من غير <think> فاتحة (زي لما الرد
-    # بيتقطع أو الموديل بيبدأ التفكير من غير ما يبعت الـ tag الفاتح)
     if "</think>" in cleaned:
         cleaned = cleaned.split("</think>", 1)[1]
 
-    # احتياط: لو لسه فيه <think> فاتحة من غير قفل (رد اتقطع نص التفكير)
     if "<think>" in cleaned:
         cleaned = cleaned.split("<think>", 1)[0]
 
@@ -554,12 +491,8 @@ def _call_groq(messages: list[dict]) -> requests.Response:
         json={
             "model": GROQ_CHAT_MODEL,
             "temperature": 0.2,
-            "max_tokens": 800,
+            "max_tokens": 400,
             "messages": messages,
-            # لو موديل Qwen اللي شغالين بيه بيدعم فصل الـ reasoning عن
-            # الرد النهائي من جهة Groq، ده بيخليها تشيله تمامًا. لو مش
-            # مدعومة، Groq هتتجاهلها من غير مشكلة، وهنعتمد وقتها على
-            # _strip_thinking تحت كـ safety net.
             "reasoning_format": "hidden",
         },
         timeout=60,
@@ -610,7 +543,6 @@ def answer_question(question: str, history: list[dict] | None = None) -> tuple[s
 
         answer = resp.json()["choices"][0]["message"]["content"].strip()
 
-        # تنضيف أي تفكير داخلي (<think>...) قبل استخدام الرد أو فحصه
         answer = _strip_thinking(answer)
 
         if _has_language_leak(answer):
