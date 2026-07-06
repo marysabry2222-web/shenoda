@@ -188,17 +188,23 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
     silentGain.connect(captureContext.destination);
   }, []);
 
-  const startCall = useCallback(async () => {
-    setErrorMsg(null);
-    setStatus('connecting');
-    isMicMutedRef.current = false;
-    setIsMicMuted(false);
+const startCall = useCallback(async () => {
+  // منع بدء مكالمة جديدة لو فيه واحدة شغالة بالفعل أو بتتوصل دلوقتي
+  if (wsRef.current !== null || status === 'connecting' || status === 'listening' || status === 'processing' || status === 'speaking') {
+    console.warn('Call already active or connecting — ignoring duplicate startCall');
+    return;
+  }
 
-    try {
-      const ws = new WebSocket(WS_URL);
-      ws.binaryType = 'arraybuffer';
-      wsRef.current = ws;
+  setErrorMsg(null);
+  setStatus('connecting');
+  isMicMutedRef.current = false;
+  setIsMicMuted(false);
 
+  try {
+    const ws = new WebSocket(WS_URL);
+    ws.binaryType = 'arraybuffer';
+    wsRef.current = ws;
+    // ... باقي الكود زي ما هو
       ws.onopen = async () => {
         try {
           playbackContextRef.current = new AudioContext({
