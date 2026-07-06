@@ -100,6 +100,11 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const nextStartTimeRef = useRef(0);
 
+  // عنصر <audio> مخصص لتشغيل روابط جاهزة (زي لحن ترحيب البابا من
+  // Cloudinary) - منفصل تمامًا عن مسار الـ PCM streaming (scheduleAudioChunk)
+  // لأن ده ملف MP3 كامل بيتشغل عبر Audio API عادي، مش شرائح PCM خام
+  const urlAudioRef = useRef<HTMLAudioElement | null>(null);
+
   /** بتوقف أي صوت شغال أو متجدول للمساعد فورًا (استخدامها الأساسي: barge-in) */
   const stopPlayback = useCallback(() => {
     for (const source of activeSourcesRef.current) {
@@ -113,6 +118,13 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
 
     if (playbackContextRef.current) {
       nextStartTimeRef.current = playbackContextRef.current.currentTime;
+    }
+
+    // وقف أي لحن/صوت رابط شغال كمان (زي لحن ترحيب البابا)
+    if (urlAudioRef.current) {
+      urlAudioRef.current.pause();
+      urlAudioRef.current.currentTime = 0;
+      urlAudioRef.current = null;
     }
   }, []);
 
@@ -146,6 +158,41 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
     source.onended = () => {
       activeSourcesRef.current = activeSourcesRef.current.filter((s) => s !== source);
     };
+  }, []);
+
+  /** بتشغّل رابط صوت جاهز (MP3 من Cloudinary مثلاً) بدل شرائح PCM -
+   *  مسار منفصل تمامًا عن scheduleAudioChunk */
+  const playAudioUrl = useCallback((url: string) => {
+    // لو فيه لحن شغال بالفعل، وقفيه الأول قبل ما تبدئي واحد جديد
+    if (urlAudioRef.current) {
+      urlAudioRef.current.pause();
+      urlAudioRef.current.currentTime = 0;
+    }
+
+    const audio = new Audio(url);
+    urlAudioRef.current = audio;
+
+    setStatus('speaking');
+
+    audio.onended = () => {
+      if (urlAudioRef.current === audio) {
+        urlAudioRef.current = null;
+      }
+      setStatus('listening');
+    };
+
+    audio.onerror = () => {
+      console.error('Failed to play audio URL:', url);
+      if (urlAudioRef.current === audio) {
+        urlAudioRef.current = null;
+      }
+      setStatus('listening');
+    };
+
+    audio.play().catch((err) => {
+      console.error('audio.play() failed:', err);
+      setStatus('listening');
+    });
   }, []);
 
   /** بتفتح المايك وتبدأ بث الصوت الخام للسيرفر بشكل مستمر */
@@ -188,33 +235,39 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
     silentGain.connect(captureContext.destination);
   }, []);
 
-const startCall = useCallback(async () => {
-  // منع بدء مكالمة جديدة لو فيه واحدة شغالة بالفعل أو بتتوصل دلوقتي
-  if (wsRef.current !== null || status === 'connecting' || status === 'listening' || status === 'processing' || status === 'speaking') {
-    console.warn('Call already active or connecting — ignoring duplicate startCall');
-    return;
-  }
+  const startCall = useCallback(async () => {
+    // منع بدء مكالمة جديدة لو فيه واحدة شغالة بالفعل أو بتتوصل دلوقتي
+    if (
+      wsRef.current !== null ||
+      status === 'connecting' ||
+      status === 'listening' ||
+      status === 'processing' ||
+      status === 'speaking'
+    ) {
+      console.warn('Call already active or connecting — ignoring duplicate startCall');
+      return;
+    }
 
-  setErrorMsg(null);
-  setStatus('connecting');
-  isMicMutedRef.current = false;
-  setIsMicMuted(false);
+    setErrorMsg(null);
+    setStatus('connecting');
+    isMicMutedRef.current = false;
+    setIsMicMuted(false);
 
-  try {
-    const ws = new WebSocket(WS_URL);
-    ws.binaryType = 'arraybuffer';
-    wsRef.current = ws;
-    // ... باقي الكود زي ما هو
+    try {
+      const ws = new WebSocket(WS_URL);
+      ws.binaryType = 'arraybuffer';
+      wsRef.current = ws;
+
       ws.onopen = async () => {
         try {
           playbackContextRef.current = new AudioContext({
             sampleRate: PLAYBACK_SAMPLE_RATE,
           });
-          console.log("Before resume:", playbackContextRef.current.state);
+          console.log('Before resume:', playbackContextRef.current.state);
 
           await playbackContextRef.current.resume();
 
-          console.log("After resume:", playbackContextRef.current.state);
+          console.log('After resume:', playbackContextRef.current.state);
           nextStartTimeRef.current = 0;
 
           await startMicStreaming();
@@ -253,7 +306,18 @@ const startCall = useCallback(async () => {
               break;
 
             case 'answer_audio_end':
-              setStatus('listening');
+              // لو الرد كان عبارة عن play_url، الـ status هيرجع
+              // 'listening' لوحده لما audio.onended يشتغل - هنا بس
+              // بنغطي حالة الـ PCM streaming العادي (Gemini TTS)
+              if (!urlAudioRef.current) {
+                setStatus('listening');
+              }
+              break;
+
+            case 'play_url':
+              // رابط صوت جاهز (زي لحن ترحيب البابا من Cloudinary) -
+              // بيتشغل عبر Audio API عادي، مسار منفصل عن الـ PCM streaming
+              playAudioUrl(msg.url as string);
               break;
 
             case 'error':
@@ -263,9 +327,8 @@ const startCall = useCallback(async () => {
           }
         } else {
           // شريحة صوت PCM خام (ArrayBuffer) من رد المساعد
-          console.log("Audio", event.data.byteLength);
+          console.log('Audio', event.data.byteLength);
           scheduleAudioChunk(event.data as ArrayBuffer);
-          
         }
       };
 
@@ -281,7 +344,7 @@ const startCall = useCallback(async () => {
       setErrorMsg('تعذر بدء المكالمة.');
       setStatus('error');
     }
-  }, [onTranscript, onAnswer, scheduleAudioChunk, startMicStreaming, stopPlayback]);
+  }, [status, onTranscript, onAnswer, scheduleAudioChunk, startMicStreaming, stopPlayback, playAudioUrl]);
 
   const endCall = useCallback(() => {
     stopPlayback();
