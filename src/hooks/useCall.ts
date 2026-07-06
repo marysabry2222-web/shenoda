@@ -306,6 +306,13 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
   const toggleMic = useCallback(() => {
     isMicMutedRef.current = !isMicMutedRef.current;
     setIsMicMuted(isMicMutedRef.current);
+
+    // نبلّغ السيرفر فورًا لما نعمل Mute، عشان يمسح أي كلام متجمع لسه
+    // ماخلصش بدل ما يستنى سكوت مش هيجي أصلاً (لإننا وقفنا بعت الصوت
+    // خالص) - وده اللي كان بيخلي الرد يتأخر ويطلع بعد الـ Unmute
+    if (isMicMutedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'mic_muted' }));
+    }
   }, []);
 
   return {
