@@ -433,7 +433,10 @@ async def voice(audio: UploadFile = File(...)):
 #     640 بايت (20ms) بنفسه. **مهم**: ده لازم صوت PCM خام (من
 #     AudioWorklet)، مش webm/opus من MediaRecorder، لأن webrtcvad محتاج
 #     فريمات ثابتة الحجم من صوت خام عشان يشتغل.
-#   - أي رسالة نصية (JSON) بتتجاهل حاليًا — محجوزة لأوامر تحكم مستقبلية.
+#   - {"type": "mic_muted"}                  لما المستخدم يعمل Mute؛ السيرفر بيمسح
+#                                             فورًا أي كلام متجمع لسه ماخلصش بدل ما
+#                                             يستنى سكوت (اللي مش هيجي أصلاً لو
+#                                             العميل وقف بعت الصوت خالص).
 #
 # Server → Client:
 #   - {"type": "interrupted"}                لما المستخدم يبدأ كلام جديد أثناء تشغيل صوت؛
@@ -543,9 +546,31 @@ async def call_websocket(websocket: WebSocket):
             if message.get("type") == "websocket.disconnect":
                 break
 
+            if message.get("text") is not None:
+                # رسالة تحكم (JSON) من العميل - مش صوت
+                try:
+                    control = json.loads(message["text"])
+                except (TypeError, json.JSONDecodeError):
+                    continue
+
+                if control.get("type") == "mic_muted":
+                    # المستخدم عمل Mute - نمسح أي كلام متجمع لسه ماخلصش
+                    # فورًا، بدل ما نستنى سكوت (اللي مش هيجي أصلاً لأن
+                    # مفيش صوت هيتبعت خالص من هنا لحد الـ Unmute). كده
+                    # الجملة الناقصة دي بتتجاهل تمامًا ومش هتتعالج لما
+                    # المستخدم يرجع يتكلم تاني.
+                    incoming_buffer.clear()
+                    utterance_buffer.clear()
+                    is_user_speaking = False
+                    silence_frame_count = 0
+                    speech_frame_count = 0
+                    print("Mic muted by client - discarded pending utterance")
+
+                continue
+
             chunk = message.get("bytes")
             if chunk is None:
-                continue  # رسالة نصية أو نوع تاني - نتجاهله حاليًا
+                continue  # نوع رسالة تاني غير متوقع - نتجاهله
 
             incoming_buffer.extend(chunk)
 
