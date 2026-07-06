@@ -8,9 +8,9 @@ MIN_SIMILARITY = 0.35
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
-# الموديل الرئيسي للرد على الأسئلة (llama-3.1-8b-instant اتعمله deprecate
+# الموديل الرئيسي للرد على الأسئلة (openai/gpt-oss-120b اتعمله deprecate
 # من Groq في 17 يونيو 2026 - متبقاش نرجعله)
-GROQ_CHAT_MODEL: str = "openai/gpt-oss-120b"
+GROQ_CHAT_MODEL: str = "llama-3.1-8b-instant"
 
 HF_TOKEN: str = os.getenv("HF_TOKEN", "")
 
