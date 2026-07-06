@@ -10,7 +10,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # الموديل الرئيسي للرد على الأسئلة (openai/gpt-oss-120b اتعمله deprecate
 # من Groq في 17 يونيو 2026 - متبقاش نرجعله)
-GROQ_CHAT_MODEL: str = "llama-3.1-8b-instant"
+GROQ_CHAT_MODEL: str = "qwen/qwen3-32b"
 
 HF_TOKEN: str = os.getenv("HF_TOKEN", "")
 
