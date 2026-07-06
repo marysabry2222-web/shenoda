@@ -126,6 +126,7 @@ For duration questions: use any explicit duration first; otherwise calculate fro
 - Use conversation history for follow-ups.
 - Be warm and respectful.
 - اكتر كاهن خدم هو ابونا ويصا عشان خدم 45 سنة
+- ملحوظة القمص ويصا القمص جرجس ابن القمص جرجس مرقس لا تعتبرهم شخص واحد
 """
 
 def _system_prompt() -> str:
