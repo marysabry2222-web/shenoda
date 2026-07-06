@@ -49,7 +49,7 @@ export function CallModal({ onClose, onTranscript, onAnswer }: CallModalProps) {
     [onAnswer]
   );
 
-  const { status, endCall, toggleMic, errorMsg } = useCall({
+  const { status, endCall, toggleMic, isMicMuted, errorMsg } = useCall({
     onTranscript,
     onAnswer: handleAnswer,
   });
@@ -129,18 +129,18 @@ export function CallModal({ onClose, onTranscript, onAnswer }: CallModalProps) {
         {/* Mute / unmute mic */}
         <button
           onClick={toggleMic}
-          disabled={!isActive || status === 'processing' || status === 'speaking'}
-          title={isListening ? 'إيقاف الميكروفون مؤقتاً' : 'تشغيل الميكروفون'}
+          disabled={!isActive}
+          title={isMicMuted ? 'تشغيل الميكروفون' : 'إيقاف الميكروفون مؤقتاً'}
           className={`
             w-14 h-14 rounded-full flex items-center justify-center transition-all shadow-lg
-            ${isListening
+            ${!isMicMuted
               ? 'bg-white/10 text-white hover:bg-white/20'
               : 'bg-white/5 text-church-400 hover:bg-white/10'
             }
             disabled:opacity-30 disabled:cursor-not-allowed
           `}
         >
-          {isListening ? (
+          {!isMicMuted ? (
             <FaMicrophone className="text-xl text-red-400" />
           ) : (
             <FaMicrophoneSlash className="text-xl" />
