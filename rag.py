@@ -189,7 +189,6 @@ TOPIC_KEYWORDS: dict[str, dict] = {
 
     "جرجس مرقس": {
         "phrases": {
-            "القمص جرجس",
             "ابونا جرجس",
             "القمص جرجس مرقس",
             "ابونا جرجس مرقس",
@@ -358,12 +357,12 @@ def _topic_score(topic: dict, text: str, tokens: set[str]) -> int:
     # العبارات الكاملة لها أولوية
     for phrase in topic.get("phrases", set()):
         if phrase in normalized:
-            score += 10
+            score += 100
 
     # الكلمات الأساسية
     for token in topic.get("tokens", set()):
         if token in tokens:
-            score += 1
+            score += 2
     for token in topic.get("negative_tokens", set()):
         if token in tokens:
             score -= 100
