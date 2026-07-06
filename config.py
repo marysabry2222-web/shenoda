@@ -28,7 +28,7 @@ GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 GEMINI_TTS_MODEL: str = "gemini-3.1-flash-tts-preview"
 # اسم شخصية الصوت (مش اسم لغة) - القائمة الكاملة في docs جوجل.
 # ممكن تتغير لاحقًا بعد ما نسمع أكتر من واحد ونشوف أنسبهم للهجة المصرية.
-GEMINI_TTS_VOICE: str = "Kore"
+GEMINI_TTS_VOICE: str = "puck"
 # بروميت التوجيه اللي بيتبعت مع كل نص عشان الموديل يتكلم باللهجة المصرية
 # (الموديل بيتحكم في الأسلوب باللغة الطبيعية بدل صوت ثابت مخصص للهجة)
 GEMINI_TTS_STYLE_PROMPT: str = (
