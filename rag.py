@@ -126,7 +126,6 @@ For duration questions: use any explicit duration first; otherwise calculate fro
 - Use conversation history for follow-ups.
 - Be warm and respectful.
 - اكتر كاهن خدم هو ابونا ويصا عشان خدم 45 سنة
-- ملحوظة القمص ويصا القمص جرجس ابن القمص جرجس مرقس لا تعتبرهم شخص واحد
 """
 
 def _system_prompt() -> str:
@@ -169,6 +168,24 @@ TOPIC_KEYWORDS: dict[str, dict] = {
         },
         "folders": ["الاباء/ابونا ابراهيم عطية"],
     },
+      "ويصا": {
+        "phrases": {
+            "ابونا ويصا",
+            "القمص ويصا",
+            "ابونا القمص ويصا",
+            "ابونا القمص ويصا جرجس",
+            "ويصا جرجس",
+            "القمص ويصا القمص جرجس",
+            "دكتور انسي",
+        },
+        "tokens": {
+            "ويصا",
+            "ابونا",
+        },
+          "negative_tokens": {"مرقس"},
+          
+        "folders": ["الاباء/ابونا ويصا"],
+    },
 
     "جرجس مرقس": {
         "phrases": {
@@ -184,6 +201,7 @@ TOPIC_KEYWORDS: dict[str, dict] = {
             "القمص",
             "ابونا",
         },
+         "negative_tokens": {"ويصا", "انسي"},
         "folders": ["الاباء/ابونا جرجس"],
     },
 
@@ -227,24 +245,7 @@ TOPIC_KEYWORDS: dict[str, dict] = {
         "folders": ["الاباء/ابونا يوساب"],
     },
 
-    "ويصا": {
-        "phrases": {
-            "ابونا ويصا",
-            "القمص ويصا",
-            "ابونا القمص ويصا",
-            "ابونا القمص ويصا جرجس",
-            "ويصا جرجس",
-            "القمص ويصا القمص جرجس",
-            "دكتور انسي",
-        },
-        "tokens": {
-            "ويصا",
-            "جرجس",
-            "القمص",
-            "ابونا",
-        },
-        "folders": ["الاباء/ابونا ويصا"],
-    },
+  
 
     "البابا شنودة الثالث": {
         "phrases": {
@@ -287,10 +288,12 @@ TOPIC_KEYWORDS: dict[str, dict] = {
         "phrases": {
             "البابا تواضروس",
             "قداسه البابا تواضروس",
+             "البابا تواضرس",
         },
         "tokens": {
             "تواضروس",
             "البابا",
+            "تواضرس",
         },
         "folders": ["زيارات البطاركة/البابا تواضروس 2015"],
     },
@@ -361,6 +364,9 @@ def _topic_score(topic: dict, text: str, tokens: set[str]) -> int:
     for token in topic.get("tokens", set()):
         if token in tokens:
             score += 1
+    for token in topic.get("negative_tokens", set()):
+        if token in tokens:
+            score -= 100
 
     # كلمات اختيارية
     for token in topic.get("any_tokens", set()):
