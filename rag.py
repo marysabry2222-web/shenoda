@@ -327,6 +327,24 @@ TOPIC_KEYWORDS: dict[str, dict] = {
         ],
     },
 }
+
+
+def _normalize_arabic(text: str) -> str:
+    text = re.sub(r"[إأآا]", "ا", text)
+    text = re.sub(r"ة", "ه", text)
+    text = re.sub(r"ى", "ي", text)
+    text = re.sub(r"[\u064B-\u0652]", "", text)
+    return text
+
+
+def _text_tokens(text: str) -> set[str]:
+    """بترجع مجموعة الكلمات (بعد التطبيع العربي) من نص معين - مستخدمة
+    في مطابقة المواضيع (TOPIC_KEYWORDS)، منفصلة عن _tokenize اللي
+    بتستخدم لفهرسة BM25 وبتشيل الـ stopwords."""
+    normalized = _normalize_arabic(text).lower()
+    return set(_word_re.findall(normalized))
+
+
 def _topic_score(topic: dict, text: str, tokens: set[str]) -> int:
     score = 0
     normalized = _normalize_arabic(text).lower()
@@ -347,20 +365,27 @@ def _topic_score(topic: dict, text: str, tokens: set[str]) -> int:
             score += 1
 
     return score
-best_topic = None
-best_score = 0
 
-tokens = _text_tokens(text)
 
-for name, topic in TOPIC_KEYWORDS.items():
-    score = _topic_score(topic, text, tokens)
+def _topic_matches(topic: dict, text: str, tokens: set[str]) -> bool:
+    """بترجع True لو الموضوع ده بيتطابق مع النص (سواء عن طريق عبارة
+    كاملة أو الكلمات الأساسية/الاختيارية)."""
+    return _topic_score(topic, text, tokens) > 0
 
-    if score > best_score:
-        best_score = score
-        best_topic = topic
 
-if best_topic:
-    return best_topic["folders"]
+def _match_topic(text: str) -> list[str] | None:
+    tokens = _text_tokens(text)
+    matches = [
+        (_topic_score(topic, text, tokens), name)
+        for name, topic in TOPIC_KEYWORDS.items()
+        if _topic_matches(topic, text, tokens)
+    ]
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    _, best_name = matches[0]
+    return TOPIC_KEYWORDS[best_name]["folders"]
+
 
 MIN_IMAGES_PER_ANSWER = 2
 MAX_IMAGES_PER_ANSWER = 5
@@ -410,28 +435,6 @@ def _load_assets_json():
         print("⚠️  ASSETS WARNING: الفولدرات دي مكتوبة في TOPIC_KEYWORDS بس مش موجودة في assets.json (هترجع صفر صور دايمًا):")
         for name in sorted(missing):
             print(f"   ✗ '{name}'")
-
-
-def _normalize_arabic(text: str) -> str:
-    text = re.sub(r"[إأآا]", "ا", text)
-    text = re.sub(r"ة", "ه", text)
-    text = re.sub(r"ى", "ي", text)
-    text = re.sub(r"[\u064B-\u0652]", "", text)
-    return text
-
-
-def _match_topic(text: str) -> list[str] | None:
-    tokens = _text_tokens(text)
-    matches = [
-        (len(topic.get("tokens") or []), name)
-        for name, topic in TOPIC_KEYWORDS.items()
-        if _topic_matches(topic, tokens)
-    ]
-    if not matches:
-        return None
-    matches.sort(reverse=True)
-    _, best_name = matches[0]
-    return TOPIC_KEYWORDS[best_name]["folders"]
 
 
 def _folders_key(folders: list[str]) -> tuple[str, ...]:
