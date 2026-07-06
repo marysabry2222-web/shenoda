@@ -142,64 +142,182 @@ NETWORK_ERROR_BASE_DELAY = 2
 # قللناها من 4 لـ 3 - عدد رسايل الهيستوري اللي بتتبعت كسياق محادثة
 # كامل لـ Groq (منفصل عن RETRIEVAL_HISTORY_WINDOW اللي لتحسين البحث بس)
 MAX_HISTORY_MESSAGES = 3
-
 TOPIC_KEYWORDS: dict[str, dict] = {
     "شنودة دوس": {
-        "tokens": {"شنوده", "دوس"},
+        "phrases": {
+            "ابونا شنوده دوس",
+            "شنوده دوس",
+        },
+        "tokens": {
+            "شنوده",
+            "دوس",
+            "ابونا",
+        },
         "folders": ["الاباء/ابونا شنودة"],
     },
+
     "ابراهيم عطية": {
-        "tokens": {"ابراهيم", "عطيه"},
+        "phrases": {
+            "ابونا ابراهيم عطيه",
+            "ابراهيم عطيه",
+        },
+        "tokens": {
+            "ابراهيم",
+            "عطيه",
+            "ابونا",
+        },
         "folders": ["الاباء/ابونا ابراهيم عطية"],
     },
+
     "جرجس مرقس": {
-        "tokens": {"جرجس", "مرقس","ابونا جرجس", "القمص جرجس"},
+        "phrases": {
+            "القمص جرجس",
+            "ابونا جرجس",
+            "القمص جرجس مرقس",
+            "ابونا جرجس مرقس",
+            "جرجس مرقس",
+        },
+        "tokens": {
+            "جرجس",
+            "مرقس",
+            "القمص",
+            "ابونا",
+        },
         "folders": ["الاباء/ابونا جرجس"],
     },
+
     "اغاثون حنا": {
-        "tokens": {"اغاثون"},
+        "phrases": {
+            "ابونا اغاثون",
+            "اغاثون حنا",
+        },
+        "tokens": {
+            "اغاثون",
+            "حنا",
+            "ابونا",
+        },
         "folders": ["الاباء/ابونا اغاثون"],
     },
+
     "مينا زكي سليمان": {
-        "tokens": {"مينا"},
+        "phrases": {
+            "ابونا مينا",
+            "مينا زكي سليمان",
+        },
+        "tokens": {
+            "مينا",
+            "زكي",
+            "سليمان",
+            "ابونا",
+        },
         "folders": ["الاباء/ابونا مينا"],
     },
+
     "يوساب حنا": {
-        "tokens": {"يوساب"},
+        "phrases": {
+            "ابونا يوساب",
+            "يوساب حنا",
+        },
+        "tokens": {
+            "يوساب",
+            "حنا",
+            "ابونا",
+        },
         "folders": ["الاباء/ابونا يوساب"],
     },
+
     "ويصا": {
-        "tokens": {"ويصا"},
+        "phrases": {
+            "ابونا ويصا",
+            "القمص ويصا",
+            "ابونا القمص ويصا",
+            "ابونا القمص ويصا جرجس",
+            "ويصا جرجس",
+        },
+        "tokens": {
+            "ويصا",
+            "جرجس",
+            "القمص",
+            "ابونا",
+        },
         "folders": ["الاباء/ابونا ويصا"],
     },
-    # "جميع الكهنة": {
-    #     "tokens": set(),
-    #     "any_tokens": {"كهنه", "الكهنه", "قمامصه", "القمامصه", "كاهن", "الكاهن"},
-    #     "folders": ["الاباء/جميع الكهنة"],
-    # },
 
     "البابا شنودة الثالث": {
-        "tokens": {"البابا", "شنوده", "الثالث"},
-        "folders": ["زيارات البطاركة/البابا شنودة 1977"],  
+        "phrases": {
+            "البابا شنوده",
+            "قداسه البابا شنوده",
+            "شنوده الثالث",
+        },
+        "tokens": {
+            "البابا",
+            "شنوده",
+            "الثالث",
+        },
+        "folders": ["زيارات البطاركة/البابا شنودة 1977"],
     },
+    "جميع الكهنة": {
+    "phrases": {
+        "جميع الكهنه",
+        "جميع الكهنة",
+        "كل الكهنه",
+        "كل الكهنة",
+    },
+    "tokens": set(),
+    "folders": ["الاباء/جميع الكهنة"],
+},
+
     "البابا كيرلس": {
-        "tokens": {"كيرلس"},
+        "phrases": {
+            "البابا كيرلس",
+            "قداسه البابا كيرلس",
+        },
+        "tokens": {
+            "كيرلس",
+            "البابا",
+        },
         "folders": ["زيارات البطاركة/1960البابا كيرلس"],
     },
+
     "البابا تواضروس": {
-        "tokens": {"تواضروس"},
+        "phrases": {
+            "البابا تواضروس",
+            "قداسه البابا تواضروس",
+        },
+        "tokens": {
+            "تواضروس",
+            "البابا",
+        },
         "folders": ["زيارات البطاركة/البابا تواضروس 2015"],
     },
 
     "خدمات الكنيسة": {
-        "tokens": {"خدمات"},
+        "phrases": {
+            "خدمات الكنيسه",
+        },
+        "tokens": {
+            "خدمات",
+        },
         "folders": ["خدمات"],
     },
 
     "تعمير/نشأة/تاريخ الكنيسة": {
+        "phrases": {
+            "تاريخ الكنيسه",
+            "نشاه الكنيسه",
+            "قصه الكنيسه",
+            "تعمير الكنيسه",
+        },
         "tokens": set(),
         "any_tokens": {
-            "نشاه", "تعمير", "بناء", "تاسيس", "قصه", "تاريخ", "حكايه", "القديمه",
+            "نشاه",
+            "تعمير",
+            "بناء",
+            "تاسيس",
+            "قصه",
+            "تاريخ",
+            "حكايه",
+            "القديمه",
         },
         "folders": [
             "صور كنيسة القديمة من 77 ل 2007",
@@ -208,22 +326,40 @@ TOPIC_KEYWORDS: dict[str, dict] = {
         ],
     },
 }
+def _topic_score(topic: dict, text: str, tokens: set[str]) -> int:
+    score = 0
+    normalized = _normalize_arabic(text).lower()
 
+    # العبارات الكاملة لها أولوية
+    for phrase in topic.get("phrases", set()):
+        if phrase in normalized:
+            score += 10
 
-def _text_tokens(text: str) -> set[str]:
-    normalized = _normalize_arabic(text)
-    return set(_word_re.findall(normalized.lower()))
+    # الكلمات الأساسية
+    for token in topic.get("tokens", set()):
+        if token in tokens:
+            score += 1
 
+    # كلمات اختيارية
+    for token in topic.get("any_tokens", set()):
+        if token in tokens:
+            score += 1
 
-def _topic_matches(topic: dict, tokens: set[str]) -> bool:
-    required = topic.get("tokens") or set()
-    if required and required.issubset(tokens):
-        return True
-    any_tokens = topic.get("any_tokens")
-    if any_tokens and (any_tokens & tokens):
-        return True
-    return False
+    return score
+best_topic = None
+best_score = 0
 
+tokens = _text_tokens(text)
+
+for name, topic in TOPIC_KEYWORDS.items():
+    score = _topic_score(topic, text, tokens)
+
+    if score > best_score:
+        best_score = score
+        best_topic = topic
+
+if best_topic:
+    return best_topic["folders"]
 
 MIN_IMAGES_PER_ANSWER = 2
 MAX_IMAGES_PER_ANSWER = 5
