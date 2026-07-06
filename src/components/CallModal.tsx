@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect } from 'react';
 import { FaMicrophone, FaMicrophoneSlash, FaPhoneSlash } from 'react-icons/fa';
 import { MdGraphicEq } from 'react-icons/md';
 import { AssistantAvatar } from './AssistantAvatar';
@@ -49,20 +49,26 @@ export function CallModal({ onClose, onTranscript, onAnswer }: CallModalProps) {
     [onAnswer]
   );
 
-  const { status, endCall, toggleMic, isMicMuted, errorMsg } = useCall({
+  const { status, startCall, endCall, toggleMic, isMicMuted, errorMsg } = useCall({
     onTranscript,
     onAnswer: handleAnswer,
   });
+
+  // نبدأ المكالمة أول ما الـ Modal يظهر، وننهيها تلقائيًا لو
+  // المكوّن اتشال من الشاشة من غير ما المستخدم يدوس Hang Up صراحة
+  useEffect(() => {
+    startCall();
+    return () => {
+      endCall();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleHangUp = () => {
     endCall();
     onClose();
   };
 
-  // Start the call as soon as the modal mounts (called by parent)
-  // The parent calls startCall via the button, we expose this via ref pattern below.
-  // Simpler: auto-start on mount
-  const isActive = status !== 'idle' && status !== 'error';
   const isListening = status === 'listening';
   const isSpeaking = status === 'speaking';
 
@@ -126,18 +132,16 @@ export function CallModal({ onClose, onTranscript, onAnswer }: CallModalProps) {
 
       {/* Bottom: call controls */}
       <div className="flex items-center gap-8">
-        {/* Mute / unmute mic */}
+        {/* Mute / unmute mic - always clickable, same simple toggle behavior as VoiceButton */}
         <button
           onClick={toggleMic}
-          disabled={!isActive}
           title={isMicMuted ? 'تشغيل الميكروفون' : 'إيقاف الميكروفون مؤقتاً'}
           className={`
             w-14 h-14 rounded-full flex items-center justify-center transition-all shadow-lg
             ${!isMicMuted
               ? 'bg-white/10 text-white hover:bg-white/20'
-              : 'bg-white/5 text-church-400 hover:bg-white/10'
+              : 'bg-red-500 hover:bg-red-600 text-white'
             }
-            disabled:opacity-30 disabled:cursor-not-allowed
           `}
         >
           {!isMicMuted ? (
