@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { FaMicrophone, FaMicrophoneSlash, FaPhoneSlash } from 'react-icons/fa';
 import { MdGraphicEq } from 'react-icons/md';
 import { AssistantAvatar } from './AssistantAvatar';
@@ -42,15 +42,27 @@ function ringColor(status: CallStatus): string {
  *   - Mic mute toggle + hang-up buttons
  */
 export function CallModal({ onClose, onTranscript, onAnswer }: CallModalProps) {
+  const [lastTranscript, setLastTranscript] = useState('');
+  const [lastAnswer, setLastAnswer] = useState('');
+
+  const handleTranscript = useCallback(
+    (text: string) => {
+      setLastTranscript(text);
+      onTranscript(text);
+    },
+    [onTranscript]
+  );
+
   const handleAnswer = useCallback(
     (text: string) => {
+      setLastAnswer(text);
       onAnswer(text);
     },
     [onAnswer]
   );
 
   const { status, startCall, endCall, toggleMic, isMicMuted, errorMsg } = useCall({
-    onTranscript,
+    onTranscript: handleTranscript,
     onAnswer: handleAnswer,
   });
 
@@ -118,6 +130,22 @@ export function CallModal({ onClose, onTranscript, onAnswer }: CallModalProps) {
         <p className="text-gold-300 font-arabic text-lg font-medium tracking-wide">
           {statusLabel(status)}
         </p>
+
+        {/* Transcript / answer preview - آخر حاجة اتقالت وآخر رد */}
+        {(lastTranscript || lastAnswer) && (
+          <div className="max-w-sm w-full flex flex-col gap-2 px-2">
+            {lastTranscript && (
+              <p className="text-white/80 font-arabic text-sm text-center leading-relaxed">
+                <span className="text-church-300">إنتِ قلتِ:</span> {lastTranscript}
+              </p>
+            )}
+            {lastAnswer && (
+              <p className="text-gold-200 font-arabic text-sm text-center leading-relaxed">
+                <span className="text-gold-400">شنودة:</span> {lastAnswer}
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Error message */}
         {errorMsg && (
