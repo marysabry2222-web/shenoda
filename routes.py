@@ -8,7 +8,6 @@ import traceback
 import wave
 
 import numpy as np
-import webrtcvad
 import httpx
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
@@ -38,13 +37,6 @@ router = APIRouter()
 # =========================
 
 CALL_SAMPLE_RATE = 16000
-CALL_FRAME_MS = 20
-CALL_FRAME_BYTES = int(CALL_SAMPLE_RATE * CALL_FRAME_MS / 1000) * 2
-CALL_SILENCE_MS = 900
-CALL_SILENCE_FRAMES = CALL_SILENCE_MS // CALL_FRAME_MS
-CALL_VAD_AGGRESSIVENESS = 1
-
-MIN_SPEECH_FRAMES_TO_INTERRUPT = 3
 
 MIN_UTTERANCE_MS = 1000
 MIN_UTTERANCE_BYTES = int(CALL_SAMPLE_RATE * MIN_UTTERANCE_MS / 1000) * 2
@@ -477,27 +469,21 @@ async def _process_utterance(
 async def call_websocket(websocket: WebSocket):
     await websocket.accept()
 
-    vad = webrtcvad.Vad(CALL_VAD_AGGRESSIVENESS)
-
-    incoming_buffer = bytearray()
     utterance_buffer = bytearray()
-    is_user_speaking = False
-    silence_frame_count = 0
-    speech_frame_count = 0
     current_task: asyncio.Task | None = None
 
     call_state = {"speaking": False}
 
-    async def _finalize_and_process(finished_utterance: bytes, *, source: str) -> None:
-        """بتاخد utterance خلصت (سواء بالسكوت أو بضغطة الميوت)، تتأكد
-        إنها مش قصيرة/هادية جدًا، وتبدأ processing task ليها.
-        بترجع الـ task الجديد أو الـ current_task القديم لو محدثتوش."""
+    async def _finalize_and_process(finished_utterance: bytes) -> None:
+        """بتاخد الـ utterance اللي اتجمعت من وقت آخر مرة اتفتح فيها المايك
+        لحد ما اتقفل (ضغطة الميوت)، تتأكد إنها مش قصيرة/هادية جدًا،
+        وتبدأ processing task ليها (STT -> LLM -> TTS)."""
         nonlocal current_task
 
         if len(finished_utterance) < MIN_UTTERANCE_BYTES or _is_too_quiet(finished_utterance):
             print(
                 f"Utterance rejected (too short/quiet - "
-                f"{len(finished_utterance)} bytes, source={source}) - likely whisper/noise, ignoring"
+                f"{len(finished_utterance)} bytes), ignoring"
             )
             return
 
@@ -505,10 +491,7 @@ async def call_websocket(websocket: WebSocket):
             print("Previous response still in progress - ignoring this utterance")
             return
 
-        print(
-            f"Utterance finished, {len(finished_utterance)} bytes (source={source}), "
-            "starting processing task"
-        )
+        print(f"Utterance finished, {len(finished_utterance)} bytes, starting processing task")
 
         try:
             with wave.open("/tmp/last_call_utterance.wav", "wb") as wf:
@@ -536,24 +519,34 @@ async def call_websocket(websocket: WebSocket):
                 except (TypeError, json.JSONDecodeError):
                     continue
 
-                if control.get("type") == "mic_muted":
-                    # بدل ما نمسح أي كلام اتجمع، نعتبر الميوت "انتهيت من
-                    # الكلام" - نقفل الـ utterance فورًا ونبعتها للمعالجة
-                    # على طول، من غير ما ننتظر الـ 700ms سكوت بتاع الـ VAD
-                    # (ده اللي كان بيسبب تأخير محسوس بعد ما المستخدم يخلص كلامه)
-                    pending = bytes(utterance_buffer) if is_user_speaking else b""
+                msg_type = control.get("type")
 
-                    incoming_buffer.clear()
+                if msg_type == "mic_muted":
+                    # المستخدم خلص كلامه (زرار الميوت - زي زرار إرسال الفويس
+                    # نوت) - اقفلي الـ utterance وابعتيها للمعالجة فورًا،
+                    # من غير أي انتظار أو حساسية صوت (VAD) خالص
+                    finished_utterance = bytes(utterance_buffer)
                     utterance_buffer.clear()
-                    is_user_speaking = False
-                    silence_frame_count = 0
-                    speech_frame_count = 0
 
-                    if pending:
-                        print("Mic muted by client - finalizing pending utterance early")
-                        await _finalize_and_process(pending, source="mute")
+                    if finished_utterance:
+                        print("Mic muted by client - finalizing utterance")
+                        await _finalize_and_process(finished_utterance)
                     else:
-                        print("Mic muted by client - no pending utterance to process")
+                        print("Mic muted by client - nothing recorded, ignoring")
+
+                elif msg_type == "mic_unmuted":
+                    # المستخدم بدأ يتكلم من جديد - نضمن إننا بندأ تسجيل نضيف.
+                    # لو المساعد كان لسه بيتكلم أو بيعالج، ده barge-in فعلي:
+                    # نلغي أي حاجة شغالة فورًا
+                    utterance_buffer.clear()
+
+                    if current_task is not None and not current_task.done():
+                        print("Barge-in: cancelling in-progress response")
+                        await websocket.send_json({"type": "interrupted"})
+                        current_task.cancel()
+                        current_task = None
+
+                    call_state["speaking"] = False
 
                 continue
 
@@ -561,52 +554,9 @@ async def call_websocket(websocket: WebSocket):
             if chunk is None:
                 continue
 
-            incoming_buffer.extend(chunk)
-
-            while len(incoming_buffer) >= CALL_FRAME_BYTES:
-                frame = bytes(incoming_buffer[:CALL_FRAME_BYTES])
-                del incoming_buffer[:CALL_FRAME_BYTES]
-
-                is_speech = vad.is_speech(frame, CALL_SAMPLE_RATE)
-
-                if is_speech:
-                    speech_frame_count += 1
-
-                    if not is_user_speaking:
-                        if speech_frame_count < MIN_SPEECH_FRAMES_TO_INTERRUPT:
-                            utterance_buffer.extend(frame)
-                            continue
-
-                        if current_task is not None and not current_task.done():
-                            if call_state.get("speaking"):
-                                print("REAL interrupt detected - cancelling in-progress speech")
-                                await websocket.send_json({"type": "interrupted"})
-                                current_task.cancel()
-                                current_task = None
-                            else:
-                                print("Speech detected while still processing (no audio yet) - NOT cancelling")
-
-                        is_user_speaking = True
-
-                    utterance_buffer.extend(frame)
-                    silence_frame_count = 0
-
-                elif is_user_speaking:
-                    utterance_buffer.extend(frame)
-                    silence_frame_count += 1
-
-                    if silence_frame_count >= CALL_SILENCE_FRAMES:
-                        finished_utterance = bytes(utterance_buffer)
-                        utterance_buffer.clear()
-                        is_user_speaking = False
-                        silence_frame_count = 0
-                        speech_frame_count = 0
-
-                        await _finalize_and_process(finished_utterance, source="silence")
-                else:
-                    speech_frame_count = 0
-                    if not is_user_speaking:
-                        utterance_buffer.clear()
+            # مفيش VAD/فريمنج تاني - أي بايتات وصلت (والمايك مش مكتوم
+            # فرونت-إند) بتتضاف زي ما هي لحد ما يوصل إشارة "خلصت الكلام"
+            utterance_buffer.extend(chunk)
 
     except WebSocketDisconnect:
         pass
