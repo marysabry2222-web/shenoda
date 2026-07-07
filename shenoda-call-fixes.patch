@@ -1,0 +1,193 @@
+diff --git a/rag.py b/rag.py
+index 19a39a0..51b7850 100644
+--- a/rag.py
++++ b/rag.py
+@@ -144,12 +144,11 @@ def _system_prompt() -> str:
+ # =========================
+ # ده مش جزء من الـ RAG/LLM - بيتفحص قبل أي استرجاع أو نداء API، فبيوفر
+ # وقت وتوكنز، وبيرجع رد ثابت + رابط لحن صوتي بدل ما يستنى رد من الموديل.
+-PAPAL_GREETING_TRIGGERS = {
+-    "معاك قداسه البابا",
+-    "البابا تواضروس",
+-    "قداسه البابا تواضروس",
+-    "البابا تواضرس",
+-}
++# بدل مطابقة substring حرفية (كانت بتفشل مع أي اختلاف بسيط من الـ STT
++# في ترتيب الكلمات أو المسافات)، بنتأكد إن "البابا" + حاجة من أسماء
++# تواضروس موجودين كـ tokens منفصلين في أي مكان في الجملة
++PAPAL_GREETING_TOKENS_A = {"البابا"}
++PAPAL_GREETING_TOKENS_B = {"تواضروس", "تواضرس"}
+ PAPAL_GREETING_REPLY = "أهلًا وسهلًا يا قداسة البابا، حابين نرحب بقداستك، وهنشغل لحن أفلوجيمينوس."
+ PAPAL_HYMN_URL = "https://res.cloudinary.com/y7ev5cpa/video/upload/v1783374987/audiomass-output_fqmcn4.mp3"
+ 
+@@ -168,8 +167,8 @@ def _papal_greeting_already_played(history: list[dict] | None) -> bool:
+ def _check_papal_greeting_trigger(question: str, history: list[dict] | None) -> bool:
+     if _papal_greeting_already_played(history):
+         return False
+-    normalized = _normalize_arabic(question).lower()
+-    return any(phrase in normalized for phrase in PAPAL_GREETING_TRIGGERS)
++    tokens = _text_tokens(question)
++    return bool(tokens & PAPAL_GREETING_TOKENS_A) and bool(tokens & PAPAL_GREETING_TOKENS_B)
+ 
+ 
+ FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، ممكن تجرب تاني بعد شوية؟"
+diff --git a/routes.py b/routes.py
+index c7026cd..cd738da 100644
+--- a/routes.py
++++ b/routes.py
+@@ -40,9 +40,9 @@ router = APIRouter()
+ CALL_SAMPLE_RATE = 16000
+ CALL_FRAME_MS = 20
+ CALL_FRAME_BYTES = int(CALL_SAMPLE_RATE * CALL_FRAME_MS / 1000) * 2
+-CALL_SILENCE_MS = 700
++CALL_SILENCE_MS = 900
+ CALL_SILENCE_FRAMES = CALL_SILENCE_MS // CALL_FRAME_MS
+-CALL_VAD_AGGRESSIVENESS = 2
++CALL_VAD_AGGRESSIVENESS = 1
+ 
+ MIN_SPEECH_FRAMES_TO_INTERRUPT = 3
+ 
+@@ -133,6 +133,13 @@ def _speech_to_text(audio_bytes: bytes) -> str:
+             os.unlink(tmp_path)
+ 
+ 
++# عتبات لرفض segments مهلوسة (نص بيطلع من ويسبر على سكوت/ضوضاء
++# مش كلام فعلي) - نفس الظاهرة اللي شفناها في اللوج مع Groq، ممكن
++# تحصل مع أي موديل ويسبر لو الصوت مش واضح
++MAX_NO_SPEECH_PROB = 0.6
++MIN_AVG_LOGPROB = -1.0
++
++
+ def _speech_to_text_pcm(pcm_bytes: bytes) -> str:
+     whisper = get_whisper()
+ 
+@@ -144,7 +151,16 @@ def _speech_to_text_pcm(pcm_bytes: bytes) -> str:
+         beam_size=1
+     )
+ 
+-    texts = [segment.text for segment in segments]
++    texts = []
++    for segment in segments:
++        if segment.no_speech_prob > MAX_NO_SPEECH_PROB or segment.avg_logprob < MIN_AVG_LOGPROB:
++            print(
++                f"Rejected hallucinated segment (no_speech_prob={segment.no_speech_prob:.2f}, "
++                f"avg_logprob={segment.avg_logprob:.2f}): {segment.text!r}"
++            )
++            continue
++        texts.append(segment.text)
++
+     text = " ".join(texts).strip()
+ 
+     print("Call transcript (local whisper):", text)
+@@ -405,7 +421,7 @@ async def _process_utterance(
+     try:
+         await websocket.send_json({"type": "processing"})
+ 
+-        question = await _speech_to_text_groq(pcm_audio)
++        question = await asyncio.to_thread(_speech_to_text_pcm, pcm_audio)
+         if not question:
+             return
+ 
+@@ -472,6 +488,41 @@ async def call_websocket(websocket: WebSocket):
+ 
+     call_state = {"speaking": False}
+ 
++    async def _finalize_and_process(finished_utterance: bytes, *, source: str) -> None:
++        """بتاخد utterance خلصت (سواء بالسكوت أو بضغطة الميوت)، تتأكد
++        إنها مش قصيرة/هادية جدًا، وتبدأ processing task ليها.
++        بترجع الـ task الجديد أو الـ current_task القديم لو محدثتوش."""
++        nonlocal current_task
++
++        if len(finished_utterance) < MIN_UTTERANCE_BYTES or _is_too_quiet(finished_utterance):
++            print(
++                f"Utterance rejected (too short/quiet - "
++                f"{len(finished_utterance)} bytes, source={source}) - likely whisper/noise, ignoring"
++            )
++            return
++
++        if current_task is not None and not current_task.done():
++            print("Previous response still in progress - ignoring this utterance")
++            return
++
++        print(
++            f"Utterance finished, {len(finished_utterance)} bytes (source={source}), "
++            "starting processing task"
++        )
++
++        try:
++            with wave.open("/tmp/last_call_utterance.wav", "wb") as wf:
++                wf.setnchannels(1)
++                wf.setsampwidth(2)
++                wf.setframerate(CALL_SAMPLE_RATE)
++                wf.writeframes(finished_utterance)
++        except Exception:
++            traceback.print_exc()
++
++        current_task = asyncio.create_task(
++            _process_utterance(websocket, finished_utterance, call_state)
++        )
++
+     try:
+         while True:
+             message = await websocket.receive()
+@@ -486,12 +537,23 @@ async def call_websocket(websocket: WebSocket):
+                     continue
+ 
+                 if control.get("type") == "mic_muted":
++                    # بدل ما نمسح أي كلام اتجمع، نعتبر الميوت "انتهيت من
++                    # الكلام" - نقفل الـ utterance فورًا ونبعتها للمعالجة
++                    # على طول، من غير ما ننتظر الـ 700ms سكوت بتاع الـ VAD
++                    # (ده اللي كان بيسبب تأخير محسوس بعد ما المستخدم يخلص كلامه)
++                    pending = bytes(utterance_buffer) if is_user_speaking else b""
++
+                     incoming_buffer.clear()
+                     utterance_buffer.clear()
+                     is_user_speaking = False
+                     silence_frame_count = 0
+                     speech_frame_count = 0
+-                    print("Mic muted by client - discarded pending utterance")
++
++                    if pending:
++                        print("Mic muted by client - finalizing pending utterance early")
++                        await _finalize_and_process(pending, source="mute")
++                    else:
++                        print("Mic muted by client - no pending utterance to process")
+ 
+                 continue
+ 
+@@ -540,34 +602,7 @@ async def call_websocket(websocket: WebSocket):
+                         silence_frame_count = 0
+                         speech_frame_count = 0
+ 
+-                        if len(finished_utterance) < MIN_UTTERANCE_BYTES or _is_too_quiet(finished_utterance):
+-                            print(
+-                                f"Utterance rejected (too short/quiet - "
+-                                f"{len(finished_utterance)} bytes) - likely whisper/noise, ignoring"
+-                            )
+-                            continue
+-
+-                        if current_task is not None and not current_task.done():
+-                            print("Previous response still in progress - ignoring this utterance")
+-                            continue
+-
+-                        print(
+-                            f"Utterance finished, {len(finished_utterance)} bytes, "
+-                            "starting processing task"
+-                        )
+-
+-                        try:
+-                            with wave.open("/tmp/last_call_utterance.wav", "wb") as wf:
+-                                wf.setnchannels(1)
+-                                wf.setsampwidth(2)
+-                                wf.setframerate(CALL_SAMPLE_RATE)
+-                                wf.writeframes(finished_utterance)
+-                        except Exception:
+-                            traceback.print_exc()
+-
+-                        current_task = asyncio.create_task(
+-                            _process_utterance(websocket, finished_utterance, call_state)
+-                        )
++                        await _finalize_and_process(finished_utterance, source="silence")
+                 else:
+                     speech_frame_count = 0
+                     if not is_user_speaking:
