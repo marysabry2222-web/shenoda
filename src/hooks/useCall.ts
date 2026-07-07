@@ -370,19 +370,29 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
     isMicMutedRef.current = false;
   }, [stopPlayback]);
 
-  /** كتم/إلغاء كتم المايك - المكالمة والاستماع فاضلين شغالين، بس السيرفر
-   *  مش هيستقبل صوت المستخدم لحد ما يلغي الكتم */
+  /** زرار واحد بيتحكم في كل حاجة - زي زرار تسجيل/إرسال الفويس نوت:
+   *  - بيدوس يبدأ يتكلم (unmute): لو المساعد كان بيتكلم لسه، ده يعتبر
+   *    مقاطعة (barge-in) - بنوقف صوته فورًا محليًا وبنبلغ السيرفر.
+   *  - بيدوس تاني لما يخلص كلامه (mute): بنبلغ السيرفر إنه خلص، وهو
+   *    يبدأ المعالجة (STT -> LLM -> TTS) على طول من غير أي انتظار. */
   const toggleMic = useCallback(() => {
-    isMicMutedRef.current = !isMicMutedRef.current;
-    setIsMicMuted(isMicMutedRef.current);
+    const goingToMuted = !isMicMutedRef.current;
+    isMicMutedRef.current = goingToMuted;
+    setIsMicMuted(goingToMuted);
 
-    // نبلّغ السيرفر فورًا لما نعمل Mute، عشان يمسح أي كلام متجمع لسه
-    // ماخلصش بدل ما يستنى سكوت مش هيجي أصلاً (لإننا وقفنا بعت الصوت
-    // خالص) - وده اللي كان بيخلي الرد يتأخر ويطلع بعد الـ Unmute
-    if (isMicMutedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return;
+
+    if (goingToMuted) {
+      // خلص كلامه - ابعتيها للمعالجة فورًا
       wsRef.current.send(JSON.stringify({ type: 'mic_muted' }));
+    } else {
+      // بدأ يتكلم من جديد - وقفي أي صوت شغال محليًا فورًا (مايستنيش رد
+      // السيرفر) وبلغيه إنه بدأ تسجيل جديد
+      stopPlayback();
+      setStatus('listening');
+      wsRef.current.send(JSON.stringify({ type: 'mic_unmuted' }));
     }
-  }, []);
+  }, [stopPlayback]);
 
   return {
     status,
