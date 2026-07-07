@@ -32,15 +32,34 @@ const PLAYBACK_SAMPLE_RATE = 24000; // نفس sample rate صوت Gemini TTS ال
 const CAPTURE_CHUNK_SAMPLES = 2048; // ~128ms عند 16kHz قبل ما نبعت للسيرفر
 
 // كود الـ AudioWorklet بيتحمّل كـ Blob module - بيجمع عينات الصوت الخام
-// (Float32) لحد ما يوصل لحجم chunk معقول، يحولها Int16 PCM، ويبعتها
-// للـ main thread عبر postMessage.
+// (Float32) لحد ما يوصل لحجم chunk معقول، يعمل resample لـ 16kHz لو
+// المتصفح كان بيسجل بمعدل مختلف (كتير من متصفحات الموبايل بتتجاهل
+// الـ sampleRate اللي بنطلبه وبتفضل شغالة بمعدل الهاردوير بتاعها -
+// زي 44100/48000)، يحولها Int16 PCM، ويبعتها للـ main thread عبر postMessage.
 const CAPTURE_WORKLET_CODE = `
 class CaptureProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this._chunks = [];
     this._bufferedSamples = 0;
-    this._targetSamples = ${CAPTURE_CHUNK_SAMPLES};
+    // "sampleRate" هنا متغير عام جوه AudioWorkletGlobalScope - بيدي
+    // معدل العينات الفعلي اللي المتصفح شغال بيه دلوقتي، مش اللي طلبناه
+    this._resampleRatio = sampleRate / ${CAPTURE_SAMPLE_RATE};
+    this._targetSamples = Math.round(${CAPTURE_CHUNK_SAMPLES} * this._resampleRatio);
+  }
+
+  _resampleLinear(input) {
+    if (this._resampleRatio === 1) return input;
+    const outputLength = Math.max(1, Math.round(input.length / this._resampleRatio));
+    const output = new Float32Array(outputLength);
+    for (let i = 0; i < outputLength; i++) {
+      const srcIndex = i * this._resampleRatio;
+      const srcFloor = Math.floor(srcIndex);
+      const srcCeil = Math.min(srcFloor + 1, input.length - 1);
+      const frac = srcIndex - srcFloor;
+      output[i] = input[srcFloor] * (1 - frac) + input[srcCeil] * frac;
+    }
+    return output;
   }
 
   process(inputs) {
@@ -58,9 +77,11 @@ class CaptureProcessor extends AudioWorkletProcessor {
           offset += chunk.length;
         }
 
-        const int16 = new Int16Array(merged.length);
-        for (let i = 0; i < merged.length; i++) {
-          const s = Math.max(-1, Math.min(1, merged[i]));
+        const resampled = this._resampleLinear(merged);
+
+        const int16 = new Int16Array(resampled.length);
+        for (let i = 0; i < resampled.length; i++) {
+          const s = Math.max(-1, Math.min(1, resampled[i]));
           int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
         }
 
