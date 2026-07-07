@@ -1,53 +1,15 @@
 import { useState, useRef, useCallback } from 'react';
-
-// =========================
-// Web Speech API type declarations
-// (not included in default TS DOM lib)
-// =========================
-interface SpeechRecognitionResultItem {
-  transcript: string;
-}
-interface SpeechRecognitionResult {
-  isFinal: boolean;
-  length: number;
-  [index: number]: SpeechRecognitionResultItem;
-}
-interface SpeechRecognitionResultList {
-  length: number;
-  [index: number]: SpeechRecognitionResult;
-}
-interface SpeechRecognitionEvent extends Event {
-  resultIndex: number;
-  results: SpeechRecognitionResultList;
-}
-interface SpeechRecognitionErrorEvent extends Event {
-  error: string;
-}
-interface SpeechRecognition extends EventTarget {
-  lang: string;
-  continuous: boolean;
-  interimResults: boolean;
-  onstart: (() => void) | null;
-  onresult: ((event: SpeechRecognitionEvent) => void) | null;
-  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-  stop: () => void;
-}
-interface SpeechRecognitionConstructor {
-  new (): SpeechRecognition;
-}
-declare global {
-  interface Window {
-    SpeechRecognition?: SpeechRecognitionConstructor;
-    webkitSpeechRecognition?: SpeechRecognitionConstructor;
-  }
-}
+import type {
+  SpeechRecognition,
+  SpeechRecognitionEvent,
+  SpeechRecognitionErrorEvent,
+} from '../types/speech';
+import { stripOverlap } from '../utils/stripOverlap';
 
 export type CallStatus =
   | 'idle'
   | 'connecting'
-  | 'listening'   // المايك فاتح، بننتظر المستخدم يتكلم
+  | 'listening'   // المايك فاتح، بيسجل كلام المستخدم محليًا (Web Speech API)
   | 'processing'  // المستخدم خلص كلامه، السيرفر بيعالج (LLM) قبل الرد
   | 'speaking'    // صوت رد المساعد بيتشغل
   | 'error';
@@ -61,7 +23,7 @@ interface UseCallReturn {
   status: CallStatus;
   startCall: () => void;
   endCall: () => void;
-  toggleMic: () => void; // كتم/إلغاء كتم المايك أثناء المكالمة (مش لازم للتشغيل العادي)
+  toggleMic: () => void; // ابدأ الكلام / خلصت الكلام (زي زرار تسجيل/إرسال الفويس نوت)
   isMicMuted: boolean;
   isCallActive: boolean;
   errorMsg: string | null;
@@ -74,52 +36,36 @@ const WS_URL =
 const PLAYBACK_SAMPLE_RATE = 24000; // نفس sample rate صوت Gemini TTS الراجع
 
 // أخطاء مؤقتة/غير قاتلة بنتجاهلها ونعيد المحاولة من غير ما نقفل الجلسة
-// (نفس القائمة المستخدمة في useVoice.ts)
 const RECOVERABLE_ERRORS = new Set(['no-speech', 'audio-capture', 'network']);
-
-// محرك التعرف على الصوت (خصوصًا مع ar-EG) بيعمل أحيانًا "resegmentation":
-// بيرجع يفسر جزء من الكلام اللي فات ويطلعه كـ isFinal تاني في index جديد،
-// فبيتكرر جزء من النص حتى لو الـ index نفسه لم يتكرر.
-// الدالة دي بتشيل أي تداخل (overlap) بين آخر كلمات في الـ buffer وأول كلمات القطعة الجديدة.
-// (نفس الدالة المستخدمة في useVoice.ts)
-function stripOverlap(bufferText: string, newChunk: string): string {
-  const bufferWords = bufferText.trim().split(/\s+/).filter(Boolean);
-  const newWords = newChunk.trim().split(/\s+/).filter(Boolean);
-
-  if (bufferWords.length === 0 || newWords.length === 0) return newChunk;
-
-  const maxOverlap = Math.min(bufferWords.length, newWords.length, 12);
-  let overlapLen = 0;
-
-  for (let len = maxOverlap; len > 0; len--) {
-    const bufferSuffix = bufferWords.slice(-len).join(' ');
-    const newPrefix = newWords.slice(0, len).join(' ');
-    if (bufferSuffix === newPrefix) {
-      overlapLen = len;
-      break;
-    }
-  }
-
-  return newWords.slice(overlapLen).join(' ');
-}
 
 /**
  * Manages a WebSocket-based real-time voice call with the assistant.
  *
- * الفكرة: زرار واحد بس (ابدأ/إنهاء مكالمة) + زرار toggleMic لكل "دور
- * كلام". التعرف على الصوت بيحصل بالكامل في المتصفح عن طريق Web Speech
- * API (نفس آلية useVoice.ts بالظبط) - السيرفر بقى بياخد نص جاهز مش
- * صوت خام، فمفيش أي بث PCM مستمر ولا AudioWorklet للمايك خالص.
+ * التعرف على الصوت (STT) بيحصل بالكامل في المتصفح عبر Web Speech API
+ * (نفس المحرك اللي بيستخدمه زرار الفويس نوت في الشات العادي)، مش عبر
+ * بث صوت خام للسيرفر - ده بيدّي جودة تعرف أعلى بكتير من أي موديل
+ * Whisper محلي، خصوصًا مع اللهجة المصرية.
  *
- * لو المستخدم بدأ يتكلم (toggleMic -> unmute) والمساعد لسه بيتكلم،
- * بنوقف صوته فورًا محليًا (barge-in) ونبلغ السيرفر بـ mic_unmuted.
+ * الفكرة: زرار واحد - "ابدأ الكلام" (unmute) / "خلصت الكلام" (mute):
+ *  - ابدأ الكلام: بيشغّل SpeechRecognition من جديد. لو المساعد كان لسه
+ *    بيتكلم أو بيعالج، ده يعتبر مقاطعة (barge-in) - بنوقف صوته فورًا
+ *    محليًا وبنبلغ السيرفر يلغي أي رد شغال.
+ *  - خلصت الكلام: بيوقف SpeechRecognition، وبمجرد ما يوصل النص النهائي
+ *    بنبعته كـ نص جاهز للسيرفر (مش صوت) عشان يبدأ LLM -> TTS على طول.
  */
 export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallReturn {
   const [status, setStatus] = useState<CallStatus>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [isMicMuted, setIsMicMuted] = useState(false); // المايك شغال تلقائيًا من لحظة الاتصال
+  const [isMicMuted, setIsMicMuted] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
+
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const transcriptBufferRef = useRef<string>('');   // بيجمع كل النص لحد "خلصت الكلام"
+  const isStoppingRef = useRef<boolean>(false);     // لتفرقة الإيقاف اليدوي عن التوقف التلقائي
+  const restartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // آخر index اتعالج فعليًا كـ isFinal جوه الجلسة الحالية (بيتصفر مع كل session جديدة/restart)
+  const lastFinalIndexRef = useRef<number>(-1);
 
   const playbackContextRef = useRef<AudioContext | null>(null);
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
@@ -127,17 +73,7 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
 
   // عنصر <audio> مخصص لتشغيل روابط جاهزة (زي لحن ترحيب البابا من
   // Cloudinary) - منفصل تمامًا عن مسار الـ PCM streaming (scheduleAudioChunk)
-  // لأن ده ملف MP3 كامل بيتشغل عبر Audio API عادي، مش شرائح PCM خام
   const urlAudioRef = useRef<HTMLAudioElement | null>(null);
-
-  // =========================
-  // Web Speech API refs (زي useVoice.ts)
-  // =========================
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const transcriptBufferRef = useRef<string>('');
-  const lastFinalIndexRef = useRef<number>(-1);
-  const isStoppingRef = useRef<boolean>(false); // إيقاف يدوي (toggleMic) مقابل توقف تلقائي من المتصفح
-  const restartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearRestartTimeout = () => {
     if (restartTimeoutRef.current) {
@@ -161,7 +97,6 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
       nextStartTimeRef.current = playbackContextRef.current.currentTime;
     }
 
-    // وقف أي لحن/صوت رابط شغال كمان (زي لحن ترحيب البابا)
     if (urlAudioRef.current) {
       urlAudioRef.current.pause();
       urlAudioRef.current.currentTime = 0;
@@ -235,19 +170,27 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
     });
   }, []);
 
-  /** بتبعت النص النهائي اللي اتجمع في transcriptBufferRef للسيرفر كـ user_utterance */
-  const sendBufferedUtterance = useCallback(() => {
+  /** بتاخد النص النهائي اللي اتجمع وتبعته للسيرفر كـ نص جاهز (مش صوت) */
+  const sendFinalTranscript = useCallback(() => {
     const text = transcriptBufferRef.current.trim();
     transcriptBufferRef.current = '';
 
-    if (text && wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'user_utterance', text }));
-    }
-  }, []);
+    if (!text) return;
 
-  /** بتبدأ جلسة Web Speech API جديدة - بتتصرف بالظبط زي useVoice.ts،
-   *  بس بدل ما تنادي onAnswer محليًا لما تخلص، بتبعت النص للسيرفر */
+    onTranscript(text);
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'user_text', text }));
+    }
+  }, [onTranscript]);
+
+  /** بتبدأ جلسة SpeechRecognition جديدة (نفس منطق useVoice.ts) */
   const startRecognition = useCallback(() => {
+    transcriptBufferRef.current = '';
+    isStoppingRef.current = false;
+    lastFinalIndexRef.current = -1;
+    clearRestartTimeout();
+
     const SpeechRecognitionImpl =
       window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -257,15 +200,12 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
       return;
     }
 
-    transcriptBufferRef.current = '';
-    lastFinalIndexRef.current = -1;
-    isStoppingRef.current = false;
-    clearRestartTimeout();
-
     const recognition = new SpeechRecognitionImpl();
     recognition.lang = 'ar-EG';
     recognition.continuous = true;
     recognition.interimResults = true;
+
+    recognition.onstart = () => setStatus('listening');
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
       const startIndex = Math.max(event.resultIndex, lastFinalIndexRef.current + 1);
@@ -290,18 +230,15 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
 
     recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
       if (RECOVERABLE_ERRORS.has(event.error)) {
-        // مش قاتل - onend هيتنفذ بعده وهيعيد المحاولة عادي طالما المستخدم
-        // لسه مادوسش "خلصت الكلام"
         return;
       }
       fatalError = true;
+      isStoppingRef.current = true;
       setErrorMsg('تعذر التعرف على الصوت');
+      setStatus('error');
     };
 
     recognition.onend = () => {
-      // لو المستخدم لسه مادوسش toggleMic (ماقالش خلص كلامه)، وملقيناش
-      // خطأ قاتل: إعادة التشغيل تلقائيًا (المتصفح بيوقف الجلسة لوحده
-      // أحيانًا بعد فترة سكوت حتى لو المستخدم لسه بيتكلم)
       if (!isStoppingRef.current && !fatalError) {
         clearRestartTimeout();
         restartTimeoutRef.current = setTimeout(() => {
@@ -309,24 +246,18 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
             lastFinalIndexRef.current = -1;
             recognition.start();
           } catch {
-            sendBufferedUtterance();
+            sendFinalTranscript();
           }
         }, 250);
         return;
       }
 
-      sendBufferedUtterance();
+      sendFinalTranscript();
     };
 
     recognitionRef.current = recognition;
     recognition.start();
-  }, [sendBufferedUtterance]);
-
-  const stopRecognition = useCallback(() => {
-    isStoppingRef.current = true;
-    clearRestartTimeout();
-    recognitionRef.current?.stop();
-  }, []);
+  }, [sendFinalTranscript]);
 
   const startCall = useCallback(async () => {
     if (
@@ -357,12 +288,9 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
           await playbackContextRef.current.resume();
           nextStartTimeRef.current = 0;
 
-          setStatus('listening');
-          // المايك بيبدأ يسجل تلقائيًا من هنا - المستخدم مش محتاج يدوس
-          // أي زرار عشان يتكلم، بالظبط زي ما كان بيحصل مع الـ PCM streaming قبل كده
           startRecognition();
         } catch {
-          setErrorMsg('حصل خطأ أثناء بدء المكالمة.');
+          setErrorMsg('لا يمكن الوصول إلى الميكروفون.');
           setStatus('error');
         }
       };
@@ -379,10 +307,6 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
 
             case 'processing':
               setStatus('processing');
-              break;
-
-            case 'transcript':
-              onTranscript(msg.text as string);
               break;
 
             case 'answer_text':
@@ -409,7 +333,6 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
               break;
           }
         } else {
-          console.log('Audio', event.data.byteLength);
           scheduleAudioChunk(event.data as ArrayBuffer);
         }
       };
@@ -426,11 +349,14 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
       setErrorMsg('تعذر بدء المكالمة.');
       setStatus('error');
     }
-  }, [status, onTranscript, onAnswer, scheduleAudioChunk, stopPlayback, playAudioUrl, startRecognition]);
+  }, [status, onAnswer, scheduleAudioChunk, startRecognition, stopPlayback, playAudioUrl]);
 
   const endCall = useCallback(() => {
     stopPlayback();
-    stopRecognition();
+
+    isStoppingRef.current = true;
+    clearRestartTimeout();
+    recognitionRef.current?.stop();
     recognitionRef.current = null;
 
     playbackContextRef.current?.close();
@@ -441,32 +367,34 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
 
     setStatus('idle');
     setErrorMsg(null);
-    setIsMicMuted(true);
-  }, [stopPlayback, stopRecognition]);
+    setIsMicMuted(false);
+  }, [stopPlayback]);
 
-  /** زرار واحد بيتحكم في دور الكلام - زي زرار تسجيل/إرسال الفويس نوت:
-   *  - بيدوس يبدأ يتكلم (unmute): لو المساعد كان بيتكلم لسه، ده يعتبر
-   *    مقاطعة (barge-in) - بنوقف صوته فورًا محليًا وبنبلغ السيرفر،
-   *    وبنبدأ جلسة Web Speech API جديدة.
-   *  - بيدوس تاني لما يخلص كلامه (mute): بنوقف الجلسة، وبمجرد ما
-   *    onend يشتغل بنبعت النص النهائي للسيرفر كـ user_utterance. */
+  /** زرار واحد بيتحكم في كل حاجة - زي زرار تسجيل/إرسال الفويس نوت:
+   *  - بيدوس يبدأ يتكلم (unmute): بيشغّل SpeechRecognition من جديد. لو
+   *    المساعد كان بيتكلم لسه، ده يعتبر مقاطعة (barge-in) - بنوقف صوته
+   *    فورًا محليًا وبنبلغ السيرفر.
+   *  - بيدوس تاني لما يخلص كلامه (mute): بيوقف SpeechRecognition، وبمجرد
+   *    ما يوصل النص النهائي بيتبعت للسيرفر كنص جاهز (STT خلص في المتصفح). */
   const toggleMic = useCallback(() => {
     const goingToMuted = !isMicMuted;
     setIsMicMuted(goingToMuted);
 
     if (goingToMuted) {
-      // خلص كلامه - أوقفي الجلسة، والنص هيتبعت لوحده من داخل onend
-      stopRecognition();
+      // خلص كلامه - أوقفي SpeechRecognition؛ onend هيبعت النص تلقائيًا
+      isStoppingRef.current = true;
+      clearRestartTimeout();
+      recognitionRef.current?.stop();
     } else {
-      // بدأ يتكلم من جديد
+      // بدأ يتكلم من جديد - وقفي أي صوت شغال محليًا فورًا وبلغي السيرفر
+      stopPlayback();
+      setStatus('listening');
       if (wsRef.current?.readyState === WebSocket.OPEN) {
-        stopPlayback();
-        setStatus('listening');
-        wsRef.current.send(JSON.stringify({ type: 'mic_unmuted' }));
+        wsRef.current.send(JSON.stringify({ type: 'start_turn' }));
       }
       startRecognition();
     }
-  }, [isMicMuted, stopPlayback, stopRecognition, startRecognition]);
+  }, [isMicMuted, stopPlayback, startRecognition]);
 
   return {
     status,
