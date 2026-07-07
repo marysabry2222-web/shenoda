@@ -147,15 +147,14 @@ def _system_prompt() -> str:
 # بدل مطابقة substring حرفية (كانت بتفشل مع أي اختلاف بسيط من الـ STT
 # في ترتيب الكلمات أو المسافات)، بنتأكد إن "البابا" + حاجة من أسماء
 # تواضروس موجودين كـ tokens منفصلين في أي مكان في الجملة
-PAPAL_GREETING_TOKENS_A = {"البابا"}
-PAPAL_GREETING_TOKENS_B = {"تواضروس", "تواضرس"}
+PAPAL_GREETING_PHRASES = {
+    "معاك قداسة البابا",
+    "معاك قداسه البابا",
+}
 PAPAL_GREETING_REPLY = "أهلًا وسهلًا يا قداسة البابا، حابين نرحب بقداستك، وهنشغل لحن أفلوجيمينوس."
 PAPAL_HYMN_URL = "https://res.cloudinary.com/y7ev5cpa/video/upload/v1783374987/audiomass-output_fqmcn4.mp3"
 
-
 def _papal_greeting_already_played(history: list[dict] | None) -> bool:
-    """بنستخدم الـ history نفسه كمصدر state بدل call_id/call_state -
-    لو الرد ده اتقال قبل كده في نفس المحادثة، ميتكررش تاني."""
     if not history:
         return False
     return any(
