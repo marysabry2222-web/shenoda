@@ -5,11 +5,13 @@ import asyncio
 import tempfile
 import os
 import traceback
+import wave
 
+import numpy as np
 import httpx
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 
 from faster_whisper import WhisperModel
@@ -23,6 +25,8 @@ from config import (
     GEMINI_TTS_MODEL,
     GEMINI_TTS_VOICE,
     GEMINI_TTS_STYLE_PROMPT,
+    GROQ_API_KEY,
+    GROQ_STT_MODEL,
 )
 import rag
 
@@ -31,18 +35,28 @@ router = APIRouter()
 # =========================
 # إعدادات المكالمة الفورية (Real-time call)
 # =========================
-#
-# ملحوظة معمارية مهمة: المكالمة بقت بتستخدم نفس آلية useVoice.ts بالظبط -
-# التعرف على الصوت (STT) بيحصل في المتصفح نفسه عن طريق Web Speech API
-# (webkitSpeechRecognition, lang='ar-EG')، مش عن طريق Whisper على السيرفر.
-# السيرفر بقى مسؤول بس عن: استقبال النص الجاهز -> LLM -> Gemini TTS.
-# ده بيلغي تمامًا الحاجة لبعت صوت خام، الـ VAD، فحص الهدوء، وكل مشاكل
-# دقة Whisper tiny مع اللهجة المصرية اللي كنا بنلف حواليها.
 
+CALL_SAMPLE_RATE = 16000
+
+MIN_UTTERANCE_MS = 1000
+MIN_UTTERANCE_BYTES = int(CALL_SAMPLE_RATE * MIN_UTTERANCE_MS / 1000) * 2
+
+MIN_SPEECH_RMS = 500.0
+
+
+def _is_too_quiet(pcm_bytes: bytes) -> bool:
+    audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
+    if audio.size == 0:
+        return True
+    rms = float(np.sqrt(np.mean(np.square(audio))))
+    return rms < MIN_SPEECH_RMS
+
+
+GEMINI_TTS_SAMPLE_RATE = 24000
 GEMINI_AUDIO_CHUNK_BYTES = 4800
 
 # =========================
-# Whisper (لسه مستخدم في /voice REST endpoint بس - مش في المكالمة)
+# Whisper
 # =========================
 
 _whisper = None
@@ -65,7 +79,7 @@ def get_whisper():
 
 
 # =========================
-# STT (لـ /voice REST endpoint فقط)
+# STT
 # =========================
 def _speech_to_text(audio_bytes: bytes) -> str:
     whisper = get_whisper()
@@ -109,6 +123,82 @@ def _speech_to_text(audio_bytes: bytes) -> str:
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+# عتبات لرفض segments مهلوسة (نص بيطلع من ويسبر على سكوت/ضوضاء
+# مش كلام فعلي) - نفس الظاهرة اللي شفناها في اللوج مع Groq، ممكن
+# تحصل مع أي موديل ويسبر لو الصوت مش واضح
+MAX_NO_SPEECH_PROB = 0.6
+MIN_AVG_LOGPROB = -1.6
+
+
+def _speech_to_text_pcm(pcm_bytes: bytes) -> str:
+    whisper = get_whisper()
+
+    audio_array = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+
+    segments, _ = whisper.transcribe(
+        audio_array,
+        language="ar",
+        beam_size=5,
+        # بيدي الموديل تلميح عن مفردات الدومين (أسماء كنسية) - بيحسّن
+        # فرصة التعرف الصح عليها عند tiny تحديدًا
+        initial_prompt="كنيسة الأنبا شنودة، الأب الكاهن، القمص، الأنبا، البابا تواضروس، الاعتراف، القداس، مدارس الأحد",
+        # من غير كده، الموديل بيميل يكرر آخر جملة/كلمة في حلقة لانهائية
+        # (زي "أحل أنا أحل أنا أحل أنا...") لما يبقى غير متأكد من الصوت -
+        # دي أشهر أسباب التهلوس مع الموديلات الصغيرة
+        condition_on_previous_text=False,
+        # فلترة داخلية للسكوت جوه الـ utterance نفسها قبل ما يحاول يفسرها كلام
+        vad_filter=True,
+    )
+
+    texts = []
+    for segment in segments:
+        if segment.no_speech_prob > MAX_NO_SPEECH_PROB or segment.avg_logprob < MIN_AVG_LOGPROB:
+            print(
+                f"Rejected hallucinated segment (no_speech_prob={segment.no_speech_prob:.2f}, "
+                f"avg_logprob={segment.avg_logprob:.2f}): {segment.text!r}"
+            )
+            continue
+        texts.append(segment.text)
+
+    text = " ".join(texts).strip()
+
+    print("Call transcript (local whisper):", text)
+
+    return text
+
+
+async def _speech_to_text_groq(pcm_bytes: bytes) -> str:
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(CALL_SAMPLE_RATE)
+        wf.writeframes(pcm_bytes)
+    wav_buffer.seek(0)
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            files={"file": ("audio.wav", wav_buffer, "audio/wav")},
+            data={
+                "model": GROQ_STT_MODEL,
+                "language": "ar",
+            },
+        )
+
+        if resp.status_code != 200:
+            print("========== GROQ STT ERROR ==========")
+            print("STATUS:", resp.status_code)
+            print("BODY:", resp.text)
+            resp.raise_for_status()
+
+        text = resp.json().get("text", "").strip()
+
+    print("Call transcript (Groq):", text)
+    return text
 
 
 GEMINI_TTS_URL = (
@@ -209,6 +299,18 @@ async def health_check():
 
 
 # =========================
+# Debug - مؤقت، نشيله بعد ما نحل مشكلة الصوت
+# =========================
+
+@router.get("/debug/last-call-audio")
+async def debug_last_call_audio():
+    path = "/tmp/last_call_utterance.wav"
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="No call audio recorded yet")
+    return FileResponse(path, media_type="audio/wav", filename="last_call_utterance.wav")
+
+
+# =========================
 # Chat
 # =========================
 
@@ -293,33 +395,34 @@ async def voice(audio: UploadFile = File(...)):
 # Real-time Call (WebSocket)
 # =========================
 #
-# بروتوكول المكالمة الفورية الجديد بين العميل (useCall.ts) والسيرفر ده:
+# بروتوكول المكالمة الفورية بين العميل (useCall.ts) والسيرفر ده:
 #
-# Client → Server (JSON نص فقط، مفيش binary frames للمايك خالص):
-#   - {"type": "mic_unmuted"}                      المستخدم بدأ يتكلم (barge-in لو المساعد بيتكلم)
-#   - {"type": "user_utterance", "text": "..."}    المستخدم خلص كلامه، ده النص النهائي
-#                                                    اللي طلع من Web Speech API في المتصفح
+# Client → Server:
+#   - {"type": "user_text", "text": "..."}   المستخدم خلص كلامه، والنص
+#     ده جاهز فعلاً (اتعرّف عليه في المتصفح بـ Web Speech API - مفيش
+#     STT جوه السيرفر تاني لمسار المكالمة)
+#   - {"type": "start_turn"}   المستخدم بدأ يتكلم من جديد (ممكن تكون
+#     مقاطعة/barge-in لو كان في رد شغال)
 #
 # Server → Client:
 #   - {"type": "interrupted"}
 #   - {"type": "processing"}
-#   - {"type": "transcript", "text": "..."}         (نفس النص اللي بعتّه، رجعناه تأكيدي بس)
 #   - {"type": "answer_text", "text": "..."}
 #   - {"type": "answer_audio_start"}
 #   - Binary frames: صوت PCM16 خام 24kHz mono على شرائح ~100ms
 #   - {"type": "answer_audio_end"}
-#   - {"type": "play_url", "url": "..."}   لما الرد عبارة عن رابط صوت جاهز
-#     (زي لحن ترحيب البابا) بدل PCM متولّد من TTS
+#   - {"type": "play_url", "url": "..."}   جديد: لما الرد عبارة عن رابط
+#     صوت جاهز (زي لحن ترحيب البابا) بدل PCM متولّد من TTS - العميل
+#     يشغّله مباشرة بـ Audio API عادي، مش عبر مسار الـ PCM streaming.
 
 
-async def _process_utterance(
+async def _process_question(
     websocket: WebSocket,
     question: str,
     call_state: dict,
 ) -> None:
     try:
         await websocket.send_json({"type": "processing"})
-        await websocket.send_json({"type": "transcript", "text": question})
 
         answer_text, images, audio_url = await get_answer(question)
 
@@ -381,48 +484,47 @@ async def call_websocket(websocket: WebSocket):
             if message.get("type") == "websocket.disconnect":
                 break
 
-            # مفيش صوت خام بيتبعت تاني - التعرف كله بيحصل في المتصفح.
-            # أي binary frame توصل (مثلاً من نسخة فرونت إند قديمة) نتجاهلها.
-            if message.get("bytes") is not None:
-                continue
-
-            if message.get("text") is None:
-                continue
-
-            try:
-                control = json.loads(message["text"])
-            except (TypeError, json.JSONDecodeError):
-                continue
-
-            msg_type = control.get("type")
-
-            if msg_type == "user_utterance":
-                question = (control.get("text") or "").strip()
-
-                if not question:
-                    print("Empty utterance received from client - ignoring")
+            if message.get("text") is not None:
+                try:
+                    control = json.loads(message["text"])
+                except (TypeError, json.JSONDecodeError):
                     continue
 
-                if current_task is not None and not current_task.done():
-                    print("Previous response still in progress - ignoring this utterance")
-                    continue
+                msg_type = control.get("type")
 
-                print(f"User utterance received: {question!r}")
+                if msg_type == "user_text":
+                    # المستخدم خلص كلامه، والنص جاهز فعلاً (Web Speech API
+                    # في المتصفح) - نبدأ المعالجة (LLM -> TTS) على طول
+                    question = (control.get("text") or "").strip()
 
-                current_task = asyncio.create_task(
-                    _process_utterance(websocket, question, call_state)
-                )
+                    if not question:
+                        continue
 
-            elif msg_type == "mic_unmuted":
-                # المستخدم بدأ يتكلم من جديد. لو المساعد كان لسه بيتكلم أو
-                # بيعالج، ده barge-in فعلي: نلغي أي حاجة شغالة فورًا
-                if current_task is not None and not current_task.done():
-                    print("Barge-in: cancelling in-progress response")
-                    await websocket.send_json({"type": "interrupted"})
-                    current_task.cancel()
-                    current_task = None
+                    if current_task is not None and not current_task.done():
+                        print("Previous response still in progress - ignoring this utterance")
+                        continue
 
-                call_state["speaking"] = False
+                    print(f"Call question received: {question!r}")
+                    current_task = asyncio.create_task(
+                        _process_question(websocket, question, call_state)
+                    )
+
+                elif msg_type == "start_turn":
+                    # المستخدم بدأ يتكلم من جديد - لو المساعد كان لسه بيتكلم
+                    # أو بيعالج، ده barge-in فعلي: نلغي أي حاجة شغالة فورًا
+                    if current_task is not None and not current_task.done():
+                        print("Barge-in: cancelling in-progress response")
+                        await websocket.send_json({"type": "interrupted"})
+                        current_task.cancel()
+                        current_task = None
+
+                    call_state["speaking"] = False
+
+                continue
+
+            # مفيش بث صوت خام تاني في مسار المكالمة - التعرف على الصوت
+            # بيحصل بالكامل في المتصفح (Web Speech API)، فأي bytes وصلت
+            # هنا (لو حصل) بيتم تجاهلها
 
     except WebSocketDisconnect:
         pass
