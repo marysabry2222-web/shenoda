@@ -144,12 +144,11 @@ def _system_prompt() -> str:
 # =========================
 # ده مش جزء من الـ RAG/LLM - بيتفحص قبل أي استرجاع أو نداء API، فبيوفر
 # وقت وتوكنز، وبيرجع رد ثابت + رابط لحن صوتي بدل ما يستنى رد من الموديل.
-PAPAL_GREETING_TRIGGERS = {
-    "معاك قداسه البابا",
-    "البابا تواضروس",
-    "قداسه البابا تواضروس",
-    "البابا تواضرس",
-}
+# بدل مطابقة substring حرفية (كانت بتفشل مع أي اختلاف بسيط من الـ STT
+# في ترتيب الكلمات أو المسافات)، بنتأكد إن "البابا" + حاجة من أسماء
+# تواضروس موجودين كـ tokens منفصلين في أي مكان في الجملة
+PAPAL_GREETING_TOKENS_A = {"البابا"}
+PAPAL_GREETING_TOKENS_B = {"تواضروس", "تواضرس"}
 PAPAL_GREETING_REPLY = "أهلًا وسهلًا يا قداسة البابا، حابين نرحب بقداستك، وهنشغل لحن أفلوجيمينوس."
 PAPAL_HYMN_URL = "https://res.cloudinary.com/y7ev5cpa/video/upload/v1783374987/audiomass-output_fqmcn4.mp3"
 
@@ -168,8 +167,8 @@ def _papal_greeting_already_played(history: list[dict] | None) -> bool:
 def _check_papal_greeting_trigger(question: str, history: list[dict] | None) -> bool:
     if _papal_greeting_already_played(history):
         return False
-    normalized = _normalize_arabic(question).lower()
-    return any(phrase in normalized for phrase in PAPAL_GREETING_TRIGGERS)
+    tokens = _text_tokens(question)
+    return bool(tokens & PAPAL_GREETING_TOKENS_A) and bool(tokens & PAPAL_GREETING_TOKENS_B)
 
 
 FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، ممكن تجرب تاني بعد شوية؟"
