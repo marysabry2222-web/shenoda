@@ -117,7 +117,7 @@ function stripOverlap(bufferText: string, newChunk: string): string {
 export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallReturn {
   const [status, setStatus] = useState<CallStatus>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [isMicMuted, setIsMicMuted] = useState(true); // بتبدأ "مكتوم" لحد ما المستخدم يدوس يتكلم
+  const [isMicMuted, setIsMicMuted] = useState(false); // المايك شغال تلقائيًا من لحظة الاتصال
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -342,7 +342,7 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
 
     setErrorMsg(null);
     setStatus('connecting');
-    setIsMicMuted(true);
+    setIsMicMuted(false);
 
     try {
       const ws = new WebSocket(WS_URL);
@@ -358,6 +358,9 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
           nextStartTimeRef.current = 0;
 
           setStatus('listening');
+          // المايك بيبدأ يسجل تلقائيًا من هنا - المستخدم مش محتاج يدوس
+          // أي زرار عشان يتكلم، بالظبط زي ما كان بيحصل مع الـ PCM streaming قبل كده
+          startRecognition();
         } catch {
           setErrorMsg('حصل خطأ أثناء بدء المكالمة.');
           setStatus('error');
@@ -423,7 +426,7 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
       setErrorMsg('تعذر بدء المكالمة.');
       setStatus('error');
     }
-  }, [status, onTranscript, onAnswer, scheduleAudioChunk, stopPlayback, playAudioUrl]);
+  }, [status, onTranscript, onAnswer, scheduleAudioChunk, stopPlayback, playAudioUrl, startRecognition]);
 
   const endCall = useCallback(() => {
     stopPlayback();
