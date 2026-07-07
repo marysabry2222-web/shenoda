@@ -151,6 +151,12 @@ PAPAL_GREETING_PHRASES = {
     "معاك قداسة البابا",
     "معاك قداسه البابا",
 }
+# لازم الكلمات التلاتة دي كلها تكون موجودة كـ tokens منفصلة في السؤال
+# (بعد التطبيع: "قداسة" -> "قداسه") عشان نفرّق بين تحية فعلية
+# ("معاك قداسة البابا...") وبين سؤال عادي بيدي اسم البابا بس
+# ("البابا تواضروس زار الكنيسة امتى؟")
+PAPAL_GREETING_REQUIRED_TOKENS = {"معاك", "قداسه", "البابا"}
+PAPAL_GREETING_REPLY = "أهلًا وسهلًا يا قداسة البابا، حابين نرحب بقداستك، وهنشغل لحن أفلوجيمينوس."
 PAPAL_GREETING_REPLY = "أهلًا وسهلًا يا قداسة البابا، حابين نرحب بقداستك، وهنشغل لحن أفلوجيمينوس."
 PAPAL_HYMN_URL = "https://res.cloudinary.com/y7ev5cpa/video/upload/v1783374987/audiomass-output_fqmcn4.mp3"
 
@@ -167,7 +173,7 @@ def _check_papal_greeting_trigger(question: str, history: list[dict] | None) -> 
     if _papal_greeting_already_played(history):
         return False
     tokens = _text_tokens(question)
-    return bool(tokens & PAPAL_GREETING_TOKENS_A) and bool(tokens & PAPAL_GREETING_TOKENS_B)
+    return PAPAL_GREETING_REQUIRED_TOKENS.issubset(tokens)
 
 
 FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، ممكن تجرب تاني بعد شوية؟"
