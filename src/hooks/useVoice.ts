@@ -1,49 +1,10 @@
 import { useState, useRef, useCallback } from 'react';
+import type {
+  SpeechRecognition,
+  SpeechRecognitionEvent,
+  SpeechRecognitionErrorEvent,
+} from '../types/speech';
 // import { sendVoice } from '../services/api';
-
-// =========================
-// Web Speech API type declarations
-// (not included in default TS DOM lib)
-// =========================
-interface SpeechRecognitionResultItem {
-  transcript: string;
-}
-interface SpeechRecognitionResult {
-  isFinal: boolean;
-  length: number;
-  [index: number]: SpeechRecognitionResultItem;
-}
-interface SpeechRecognitionResultList {
-  length: number;
-  [index: number]: SpeechRecognitionResult;
-}
-interface SpeechRecognitionEvent extends Event {
-  resultIndex: number;
-  results: SpeechRecognitionResultList;
-}
-interface SpeechRecognitionErrorEvent extends Event {
-  error: string;
-}
-interface SpeechRecognition extends EventTarget {
-  lang: string;
-  continuous: boolean;
-  interimResults: boolean;
-  onstart: (() => void) | null;
-  onresult: ((event: SpeechRecognitionEvent) => void) | null;
-  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
-  onend: (() => void) | null;
-  start: () => void;
-  stop: () => void;
-}
-interface SpeechRecognitionConstructor {
-  new (): SpeechRecognition;
-}
-declare global {
-  interface Window {
-    SpeechRecognition?: SpeechRecognitionConstructor;
-    webkitSpeechRecognition?: SpeechRecognitionConstructor;
-  }
-}
 
 interface UseVoiceReturn {
   isRecording: boolean;
@@ -53,33 +14,10 @@ interface UseVoiceReturn {
   error: string | null;
 }
 
+import { stripOverlap } from '../utils/stripOverlap';
+
 // أخطاء مؤقتة/غير قاتلة بنتجاهلها ونعيد المحاولة من غير ما نقفل الجلسة
 const RECOVERABLE_ERRORS = new Set(['no-speech', 'audio-capture', 'network']);
-
-// محرك التعرف على الصوت (خصوصًا مع ar-EG) بيعمل أحيانًا "resegmentation":
-// بيرجع يفسر جزء من الكلام اللي فات ويطلعه كـ isFinal تاني في index جديد،
-// فبيتكرر جزء من النص حتى لو الـ index نفسه لم يتكرر.
-// الدالة دي بتشيل أي تداخل (overlap) بين آخر كلمات في الـ buffer وأول كلمات القطعة الجديدة.
-function stripOverlap(bufferText: string, newChunk: string): string {
-  const bufferWords = bufferText.trim().split(/\s+/).filter(Boolean);
-  const newWords = newChunk.trim().split(/\s+/).filter(Boolean);
-
-  if (bufferWords.length === 0 || newWords.length === 0) return newChunk;
-
-  const maxOverlap = Math.min(bufferWords.length, newWords.length, 12); // حد أقصى معقول للبحث
-  let overlapLen = 0;
-
-  for (let len = maxOverlap; len > 0; len--) {
-    const bufferSuffix = bufferWords.slice(-len).join(' ');
-    const newPrefix = newWords.slice(0, len).join(' ');
-    if (bufferSuffix === newPrefix) {
-      overlapLen = len;
-      break;
-    }
-  }
-
-  return newWords.slice(overlapLen).join(' ');
-}
 
 export function useVoice(onAnswer: (text: string) => void): UseVoiceReturn {
   const [isRecording, setIsRecording] = useState(false);
