@@ -431,13 +431,33 @@ async def _process_question(
 
         await websocket.send_json({"type": "answer_text", "text": answer_text})
 
-        # لو فيه رابط صوت جاهز (تريجر خاص زي ترحيب البابا)، ابعتيه
-        # مباشرة للعميل يشغله - من غير ما تمري على Gemini TTS خالص
+        # لو فيه رابط صوت جاهز (تريجر خاص زي ترحيب البابا)، لازم الأول
+        # نقول نص الترحيب فعليًا بالـ TTS العادي، وبس بعد ما ينتهي فعليًا
+        # (مش مجرد بعد ما نبعت آخر chunk) نبعت play_url للحن. لو بعتنا
+        # play_url بدري، playAudioUrl في العميل بيعمل stopPlayback() أول
+        # حاجة، وده هيقطع صوت الترحيب لو لسه بيتشغل فعليًا عند العميل.
         if audio_url:
+            greeting_audio = await _gemini_text_to_speech(answer_text)
+            print("Greeting audio bytes:", len(greeting_audio))
+
             await websocket.send_json({"type": "answer_audio_start"})
             call_state["speaking"] = True
-            await websocket.send_json({"type": "play_url", "url": audio_url})
+
+            for i in range(0, len(greeting_audio), GEMINI_AUDIO_CHUNK_BYTES):
+                chunk = greeting_audio[i:i + GEMINI_AUDIO_CHUNK_BYTES]
+                await websocket.send_bytes(chunk)
+                await asyncio.sleep(0)
+
             await websocket.send_json({"type": "answer_audio_end"})
+
+            # مدة صوت الترحيب الفعلية (samples / sample_rate) - بننتظرها
+            # عشان نضمن إن التشغيل عند العميل خلص فعلاً قبل ما نبعت
+            # play_url، لأن playAudioUrl بتعمل stopPlayback() أول حاجة
+            num_samples = len(greeting_audio) // 2  # PCM16 = 2 bytes/sample
+            greeting_duration = num_samples / GEMINI_TTS_SAMPLE_RATE
+            await asyncio.sleep(greeting_duration)
+
+            await websocket.send_json({"type": "play_url", "url": audio_url})
             return
 
         audio_data = await _gemini_text_to_speech(answer_text)
