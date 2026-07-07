@@ -71,9 +71,10 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const nextStartTimeRef = useRef(0);
 
-  // عنصر <audio> مخصص لتشغيل روابط جاهزة (زي لحن ترحيب البابا من
-  // Cloudinary) - منفصل تمامًا عن مسار الـ PCM streaming (scheduleAudioChunk)
-  const urlAudioRef = useRef<HTMLAudioElement | null>(null);
+  // بيتفعل وقت ما لحن/رابط صوت جاهز (زي ترحيب البابا) شغال - بيمنع
+  // "answer_audio_end" (اللي بيوصل فورًا بعد ما نبعت play_url) من إنه
+  // يقفل الـ status بدري قبل ما اللحن يخلص فعليًا (source.onended)
+  const isPlayingUrlRef = useRef(false);
 
   const clearRestartTimeout = () => {
     if (restartTimeoutRef.current) {
@@ -97,11 +98,10 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
       nextStartTimeRef.current = playbackContextRef.current.currentTime;
     }
 
-    if (urlAudioRef.current) {
-      urlAudioRef.current.pause();
-      urlAudioRef.current.currentTime = 0;
-      urlAudioRef.current = null;
-    }
+    // كانت هنا مراجعة لـ urlAudioRef (عنصر <audio> غير موجود أصلاً في
+    // الكود ده) - بقينا بنشغل روابط الصوت عبر نفس الـ AudioContext
+    // زي أي source تاني، فبيتوقف مع الحلقة اللي فوق. بنصفّر الـ flag بس.
+    isPlayingUrlRef.current = false;
   }, []);
 
   /** بتاخد شريحة صوت PCM16 خام (24kHz) وتضيفها لطابور التشغيل المتصل */
@@ -136,39 +136,52 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
     };
   }, []);
 
-  /** بتشغّل رابط صوت جاهز (MP3 من Cloudinary مثلاً) بدل شرائح PCM -
-   *  مسار منفصل تمامًا عن scheduleAudioChunk */
-  const playAudioUrl = useCallback((url: string) => {
-    if (urlAudioRef.current) {
-      urlAudioRef.current.pause();
-      urlAudioRef.current.currentTime = 0;
+  /** بتشغّل رابط صوت جاهز (MP3 من Cloudinary مثلاً، زي لحن الترحيب) عبر
+   *  نفس الـ AudioContext المفتوح أصلاً للمكالمة - مش عنصر <audio> جديد
+   *  منفصل، عشان نتجنب قيود الـ autoplay على الموبايل اللي بتمنع تشغيل
+   *  عنصر <audio> جديد من غير user gesture مباشر مرتبط بيه. */
+  const playAudioUrl = useCallback(async (url: string) => {
+    stopPlayback();
+
+    const playbackContext = playbackContextRef.current;
+    if (!playbackContext) {
+      console.error('No playback context available to play hymn URL');
+      setStatus('listening');
+      return;
     }
 
-    const audio = new Audio(url);
-    urlAudioRef.current = audio;
-
     setStatus('speaking');
+    isPlayingUrlRef.current = true;
 
-    audio.onended = () => {
-      if (urlAudioRef.current === audio) {
-        urlAudioRef.current = null;
+    try {
+      if (playbackContext.state === 'suspended') {
+        await playbackContext.resume();
       }
-      setStatus('listening');
-    };
 
-    audio.onerror = () => {
-      console.error('Failed to play audio URL:', url);
-      if (urlAudioRef.current === audio) {
-        urlAudioRef.current = null;
-      }
-      setStatus('listening');
-    };
+      const response = await fetch(url);
+      const arrayBuffer = await response.arrayBuffer();
+      const audioBuffer = await playbackContext.decodeAudioData(arrayBuffer);
 
-    audio.play().catch((err) => {
-      console.error('audio.play() failed:', err);
+      const source = playbackContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(playbackContext.destination);
+
+      source.onended = () => {
+        activeSourcesRef.current = activeSourcesRef.current.filter((s) => s !== source);
+        isPlayingUrlRef.current = false;
+        setStatus('listening');
+      };
+
+      const startTime = Math.max(playbackContext.currentTime, nextStartTimeRef.current);
+      activeSourcesRef.current.push(source);
+      source.start(startTime);
+      nextStartTimeRef.current = startTime + audioBuffer.duration;
+    } catch (err) {
+      console.error('Failed to play hymn URL:', url, err);
+      isPlayingUrlRef.current = false;
       setStatus('listening');
-    });
-  }, []);
+    }
+  }, [stopPlayback]);
 
   /** بتاخد النص النهائي اللي اتجمع وتبعته للسيرفر كـ نص جاهز (مش صوت) */
   const sendFinalTranscript = useCallback(() => {
@@ -275,24 +288,30 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
     setStatus('connecting');
     setIsMicMuted(false);
 
+    // بننشئ الـ AudioContext ونعمله resume هنا فورًا - جوه نفس الـ call
+    // stack المتزامن بتاع ضغطة المستخدم على الزرار (قبل أي await لفتح
+    // الـ WebSocket). ده ضروري على iOS Safari وبعض متصفحات الموبايل
+    // عشان الصوت يتحسب "unlocked" فعليًا ولو اتشغل بعدين بشكل غير متزامن
+    // (زي لحن الترحيب اللي بيوصل عبر رسالة WebSocket لاحقة).
+    try {
+      playbackContextRef.current = new AudioContext({
+        sampleRate: PLAYBACK_SAMPLE_RATE,
+      });
+      await playbackContextRef.current.resume();
+      nextStartTimeRef.current = 0;
+    } catch {
+      setErrorMsg('لا يمكن تفعيل الصوت على هذا الجهاز.');
+      setStatus('error');
+      return;
+    }
+
     try {
       const ws = new WebSocket(WS_URL);
       ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
 
-      ws.onopen = async () => {
-        try {
-          playbackContextRef.current = new AudioContext({
-            sampleRate: PLAYBACK_SAMPLE_RATE,
-          });
-          await playbackContextRef.current.resume();
-          nextStartTimeRef.current = 0;
-
-          startRecognition();
-        } catch {
-          setErrorMsg('لا يمكن الوصول إلى الميكروفون.');
-          setStatus('error');
-        }
+      ws.onopen = () => {
+        startRecognition();
       };
 
       ws.onmessage = (event: MessageEvent) => {
@@ -318,7 +337,9 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
               break;
 
             case 'answer_audio_end':
-              if (!urlAudioRef.current) {
+              // لو لحن/رابط صوت جاهز شغال دلوقتي (زي ترحيب البابا)،
+              // متسبقهوش تقفل الـ status - onended بتاعه هو اللي يقرر
+              if (!isPlayingUrlRef.current) {
                 setStatus('listening');
               }
               break;
