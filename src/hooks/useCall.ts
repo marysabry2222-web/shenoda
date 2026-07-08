@@ -65,11 +65,16 @@ const MIN_VALID_CHUNK_LENGTH = 2;
  * من غير أي نص حقيقي جديد، بنبعت النص المتجمع تلقائيًا من غير ما نستنى
  * ضغطة الزرار - الزرار اليدوي (toggleMic) لسه شغال زي ما هو بالظبط
  * كطريقة بديلة/يدوية لإنهاء الدور في أي وقت.
+ *
+ * المايك بيبدأ مقفول (muted) بشكل افتراضي لحظة ما الكول يتصل: الـ
+ * WebSocket بيتفتح ومفيش SpeechRecognition شغال لحد ما المستخدم يدوس
+ * "ابدأ الكلام" (toggleMic) بنفسه - ده اللي بيستدعي startRecognition()
+ * ويبلغ السيرفر بـ start_turn.
  */
 export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallReturn {
   const [status, setStatus] = useState<CallStatus>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [isMicMuted, setIsMicMuted] = useState(false);
+  const [isMicMuted, setIsMicMuted] = useState(true);
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -322,7 +327,7 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
 
     setErrorMsg(null);
     setStatus('connecting');
-    setIsMicMuted(false);
+    setIsMicMuted(true);
 
     // بننشئ الـ AudioContext ونعمله resume هنا فورًا - جوه نفس الـ call
     // stack المتزامن بتاع ضغطة المستخدم على الزرار (قبل أي await لفتح
@@ -347,7 +352,8 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
       wsRef.current = ws;
 
       ws.onopen = () => {
-        startRecognition();
+        // المايك مقفول بشكل افتراضي - متبدأش SpeechRecognition لوحدها.
+        // المستخدم لازم يدوس "ابدأ الكلام" (toggleMic) عشان يشغّلها.
       };
 
       ws.onmessage = (event: MessageEvent) => {
@@ -406,7 +412,7 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
       setErrorMsg('تعذر بدء المكالمة.');
       setStatus('error');
     }
-  }, [status, onAnswer, scheduleAudioChunk, startRecognition, stopPlayback, playAudioUrl]);
+  }, [status, onAnswer, scheduleAudioChunk, stopPlayback, playAudioUrl]);
 
   const endCall = useCallback(() => {
     stopPlayback();
@@ -425,7 +431,7 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
 
     setStatus('idle');
     setErrorMsg(null);
-    setIsMicMuted(false);
+    setIsMicMuted(true);
   }, [stopPlayback]);
 
   /** زرار واحد بيتحكم في كل حاجة - زي زرار تسجيل/إرسال الفويس نوت:
