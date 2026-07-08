@@ -11,7 +11,6 @@ export type CallStatus =
   | 'connecting'
   | 'listening'   // المايك فاتح، بيسجل كلام المستخدم محليًا (Web Speech API)
   | 'processing'  // المستخدم خلص كلامه، السيرفر بيعالج (LLM) قبل الرد
-  | 'buffering'   // النص وصل وظهر بالفعل، بس الصوت لسه بيتجهز (Gemini TTS)
   | 'speaking'    // صوت رد المساعد بيتشغل
   | 'error';
 
@@ -331,14 +330,6 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
 
             case 'answer_text':
               onAnswer(msg.text as string);
-              break;
-
-            case 'tts_loading':
-              // النص ظهر بالفعل - دلوقتي بس بنستنى Gemini TTS يجهز
-              // الصوت (مكالمة مش streaming ممكن تاخد وقت). الفرونت
-              // يقدر يعرض indicator مختلف عن 'processing' (زي "بيجهز
-              // الصوت...") بدل ما يفضل ساكت لحد answer_audio_start
-              setStatus('buffering');
               break;
 
             case 'answer_audio_start':
