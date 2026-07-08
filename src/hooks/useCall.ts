@@ -1,441 +1,562 @@
-import { useState, useRef, useCallback } from 'react';
-import type {
-  SpeechRecognition,
-  SpeechRecognitionEvent,
-  SpeechRecognitionErrorEvent,
-} from '../types/speech';
-import { stripOverlap } from '../utils/stripOverlap';
+import io
+import json
+import base64
+import asyncio
+import tempfile
+import os
+import traceback
+import wave
 
-export type CallStatus =
-  | 'idle'
-  | 'connecting'
-  | 'listening'   // المايك فاتح، بيسجل كلام المستخدم محليًا (Web Speech API)
-  | 'processing'  // المستخدم خلص كلامه، السيرفر بيعالج (LLM) قبل الرد
-  | 'speaking'    // صوت رد المساعد بيتشغل
-  | 'error';
+import numpy as np
+import httpx
 
-interface UseCallOptions {
-  onTranscript: (text: string) => void;   // اللي المستخدم قاله
-  onAnswer: (text: string) => void;        // رد المساعد النصي
-}
+from fastapi import APIRouter, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse, FileResponse
+from pydantic import BaseModel
 
-interface UseCallReturn {
-  status: CallStatus;
-  startCall: () => void;
-  endCall: () => void;
-  toggleMic: () => void; // ابدأ الكلام / خلصت الكلام (زي زرار تسجيل/إرسال الفويس نوت)
-  isMicMuted: boolean;
-  isCallActive: boolean;
-  errorMsg: string | null;
-}
+from faster_whisper import WhisperModel
 
-const WS_URL =
-  (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/^http/, 'ws') +
-  '/ws/call';
+from models import ChatRequest, ChatResponse, HealthResponse, HistoryItem
+from config import (
+    WHISPER_MODEL,
+    ELEVENLABS_API_KEY,
+    ELEVENLABS_VOICE_ID,
+    GEMINI_API_KEY,
+    GEMINI_TTS_MODEL,
+    GEMINI_TTS_VOICE,
+    GEMINI_TTS_STYLE_PROMPT,
+    GROQ_API_KEY,
+    GROQ_STT_MODEL,
+)
+import rag
 
-const PLAYBACK_SAMPLE_RATE = 24000; // نفس sample rate صوت Gemini TTS الراجع
+router = APIRouter()
 
-// أخطاء "قاتلة" فعلاً بس - زي رفض إذن الميكروفون - دي اللي بتوقف
-// المكالمة وتوريلها رسالة إيرور للمستخدم. أي حاجة تانية (no-speech,
-// audio-capture, network, aborted, bad-grammar, language-not-supported،
-// أو أي إيرور جديد ممكن يظهر في متصفحات مختلفة) بنعتبرها مؤقتة ومنسيبش
-// المكالمة/السمع يقف بسببها؛ onend أصلاً بيعمل إعادة تشغيل تلقائية بعد
-// 250ms، فمفيش داعي نقفل الجلسة كلها على إيرور ممكن يكون عابر.
-const FATAL_ERRORS = new Set(['not-allowed', 'service-not-allowed']);
+# =========================
+# إعدادات المكالمة الفورية (Real-time call)
+# =========================
 
-/**
- * Manages a WebSocket-based real-time voice call with the assistant.
- *
- * التعرف على الصوت (STT) بيحصل بالكامل في المتصفح عبر Web Speech API
- * (نفس المحرك اللي بيستخدمه زرار الفويس نوت في الشات العادي)، مش عبر
- * بث صوت خام للسيرفر - ده بيدّي جودة تعرف أعلى بكتير من أي موديل
- * Whisper محلي، خصوصًا مع اللهجة المصرية.
- *
- * الفكرة: زرار واحد - "ابدأ الكلام" (unmute) / "خلصت الكلام" (mute):
- *  - ابدأ الكلام: بيشغّل SpeechRecognition من جديد. لو المساعد كان لسه
- *    بيتكلم أو بيعالج، ده يعتبر مقاطعة (barge-in) - بنوقف صوته فورًا
- *    محليًا وبنبلغ السيرفر يلغي أي رد شغال.
- *  - خلصت الكلام: بيوقف SpeechRecognition، وبمجرد ما يوصل النص النهائي
- *    بنبعته كـ نص جاهز للسيرفر (مش صوت) عشان يبدأ LLM -> TTS على طول.
- */
-export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallReturn {
-  const [status, setStatus] = useState<CallStatus>('idle');
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [isMicMuted, setIsMicMuted] = useState(false);
+CALL_SAMPLE_RATE = 16000
 
-  const wsRef = useRef<WebSocket | null>(null);
+MIN_UTTERANCE_MS = 1000
+MIN_UTTERANCE_BYTES = int(CALL_SAMPLE_RATE * MIN_UTTERANCE_MS / 1000) * 2
 
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const transcriptBufferRef = useRef<string>('');   // بيجمع كل النص لحد "خلصت الكلام"
-  const isStoppingRef = useRef<boolean>(false);     // لتفرقة الإيقاف اليدوي عن التوقف التلقائي
-  const restartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // آخر index اتعالج فعليًا كـ isFinal جوه الجلسة الحالية (بيتصفر مع كل session جديدة/restart)
-  const lastFinalIndexRef = useRef<number>(-1);
+MIN_SPEECH_RMS = 500.0
 
-  const playbackContextRef = useRef<AudioContext | null>(null);
-  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
-  const nextStartTimeRef = useRef(0);
 
-  // بيتفعل وقت ما لحن/رابط صوت جاهز (زي ترحيب البابا) شغال - بيمنع
-  // "answer_audio_end" (اللي بيوصل فورًا بعد ما نبعت play_url) من إنه
-  // يقفل الـ status بدري قبل ما اللحن يخلص فعليًا (source.onended)
-  const isPlayingUrlRef = useRef(false);
+def _is_too_quiet(pcm_bytes: bytes) -> bool:
+    audio = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
+    if audio.size == 0:
+        return True
+    rms = float(np.sqrt(np.mean(np.square(audio))))
+    return rms < MIN_SPEECH_RMS
 
-  const clearRestartTimeout = () => {
-    if (restartTimeoutRef.current) {
-      clearTimeout(restartTimeoutRef.current);
-      restartTimeoutRef.current = null;
+
+GEMINI_TTS_SAMPLE_RATE = 24000
+GEMINI_AUDIO_CHUNK_BYTES = 4800
+
+# =========================
+# Whisper
+# =========================
+
+_whisper = None
+
+def get_whisper():
+    global _whisper
+
+    if _whisper is None:
+        print(f"Loading Whisper model ({WHISPER_MODEL})...")
+
+        _whisper = WhisperModel(
+            WHISPER_MODEL,
+            device="cpu",
+            compute_type="int8"
+        )
+
+        print("✅ Whisper loaded successfully")
+
+    return _whisper
+
+
+# =========================
+# STT
+# =========================
+def _speech_to_text(audio_bytes: bytes) -> str:
+    whisper = get_whisper()
+
+    with tempfile.NamedTemporaryFile(
+        suffix=".webm",
+        delete=False
+    ) as f:
+        f.write(audio_bytes)
+        tmp_path = f.name
+
+    try:
+        print("Starting transcription...")
+        print("Before transcribe")
+
+        segments, info = whisper.transcribe(
+            tmp_path,
+            language="ar",
+            beam_size=1
+        )
+
+        print("After transcribe")
+
+        texts = []
+
+        for segment in segments:
+            print("Segment:", segment.text)
+            texts.append(segment.text)
+
+        text = " ".join(texts).strip()
+
+        print("Transcript:", text)
+
+        return text
+
+    except Exception:
+        print("========== STT ERROR ==========")
+        traceback.print_exc()
+        raise
+
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+# عتبات لرفض segments مهلوسة (نص بيطلع من ويسبر على سكوت/ضوضاء
+# مش كلام فعلي) - نفس الظاهرة اللي شفناها في اللوج مع Groq، ممكن
+# تحصل مع أي موديل ويسبر لو الصوت مش واضح
+MAX_NO_SPEECH_PROB = 0.6
+MIN_AVG_LOGPROB = -1.6
+
+
+def _speech_to_text_pcm(pcm_bytes: bytes) -> str:
+    whisper = get_whisper()
+
+    audio_array = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+
+    segments, _ = whisper.transcribe(
+        audio_array,
+        language="ar",
+        beam_size=5,
+        # بيدي الموديل تلميح عن مفردات الدومين (أسماء كنسية) - بيحسّن
+        # فرصة التعرف الصح عليها عند tiny تحديدًا
+        initial_prompt="كنيسة الأنبا شنودة، الأب الكاهن، القمص، الأنبا، البابا تواضروس، الاعتراف، القداس، مدارس الأحد",
+        # من غير كده، الموديل بيميل يكرر آخر جملة/كلمة في حلقة لانهائية
+        # (زي "أحل أنا أحل أنا أحل أنا...") لما يبقى غير متأكد من الصوت -
+        # دي أشهر أسباب التهلوس مع الموديلات الصغيرة
+        condition_on_previous_text=False,
+        # فلترة داخلية للسكوت جوه الـ utterance نفسها قبل ما يحاول يفسرها كلام
+        vad_filter=True,
+    )
+
+    texts = []
+    for segment in segments:
+        if segment.no_speech_prob > MAX_NO_SPEECH_PROB or segment.avg_logprob < MIN_AVG_LOGPROB:
+            print(
+                f"Rejected hallucinated segment (no_speech_prob={segment.no_speech_prob:.2f}, "
+                f"avg_logprob={segment.avg_logprob:.2f}): {segment.text!r}"
+            )
+            continue
+        texts.append(segment.text)
+
+    text = " ".join(texts).strip()
+
+    print("Call transcript (local whisper):", text)
+
+    return text
+
+
+async def _speech_to_text_groq(pcm_bytes: bytes) -> str:
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(CALL_SAMPLE_RATE)
+        wf.writeframes(pcm_bytes)
+    wav_buffer.seek(0)
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            files={"file": ("audio.wav", wav_buffer, "audio/wav")},
+            data={
+                "model": GROQ_STT_MODEL,
+                "language": "ar",
+            },
+        )
+
+        if resp.status_code != 200:
+            print("========== GROQ STT ERROR ==========")
+            print("STATUS:", resp.status_code)
+            print("BODY:", resp.text)
+            resp.raise_for_status()
+
+        text = resp.json().get("text", "").strip()
+
+    print("Call transcript (Groq):", text)
+    return text
+
+
+GEMINI_TTS_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_TTS_MODEL}:generateContent"
+)
+
+
+def _build_gemini_tts_payload(text: str) -> dict:
+    styled_text = f"{GEMINI_TTS_STYLE_PROMPT}\n\n{text}"
+
+    return {
+        "contents": [{"parts": [{"text": styled_text}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {"voiceName": GEMINI_TTS_VOICE}
+                }
+            },
+        },
     }
-  };
 
-  /** بتوقف أي صوت شغال أو متجدول للمساعد فورًا (استخدامها الأساسي: barge-in) */
-  const stopPlayback = useCallback(() => {
-    for (const source of activeSourcesRef.current) {
-      try {
-        source.stop();
-      } catch {
-        // ممكن يكون خلص أصلاً - نتجاهل
-      }
-    }
-    activeSourcesRef.current = [];
 
-    if (playbackContextRef.current) {
-      nextStartTimeRef.current = playbackContextRef.current.currentTime;
-    }
+async def _gemini_text_to_speech(text: str) -> bytes:
+    print("ENTERED GEMINI TTS")
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            GEMINI_TTS_URL,
+            headers={
+                "x-goog-api-key": GEMINI_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json=_build_gemini_tts_payload(text),
+        )
 
-    // كانت هنا مراجعة لـ urlAudioRef (عنصر <audio> غير موجود أصلاً في
-    // الكود ده) - بقينا بنشغل روابط الصوت عبر نفس الـ AudioContext
-    // زي أي source تاني، فبيتوقف مع الحلقة اللي فوق. بنصفّر الـ flag بس.
-    isPlayingUrlRef.current = false;
-  }, []);
+        if resp.status_code != 200:
+            print("========== GEMINI TTS ERROR ==========")
+            print("STATUS:", resp.status_code)
+            print("BODY:", resp.text)
 
-  /** بتاخد شريحة صوت PCM16 خام (24kHz) وتضيفها لطابور التشغيل المتصل */
-  const scheduleAudioChunk = useCallback((buffer: ArrayBuffer) => {
-    const playbackContext = playbackContextRef.current;
-    if (!playbackContext) return;
+        resp.raise_for_status()
+        data = resp.json()
 
-    const int16 = new Int16Array(buffer);
-    const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) {
-      float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7fff);
-    }
+    try:
+        b64_audio = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+    except (KeyError, IndexError):
+        print("========== GEMINI TTS UNEXPECTED RESPONSE ==========")
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        raise RuntimeError("Gemini TTS response missing audio data")
 
-    const audioBuffer = playbackContext.createBuffer(
-      1,
-      float32.length,
-      PLAYBACK_SAMPLE_RATE
-    );
-    audioBuffer.copyToChannel(float32, 0);
+    return base64.b64decode(b64_audio)
 
-    const source = playbackContext.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(playbackContext.destination);
+# =========================
+# RAG / LLM
+# =========================
 
-    const startTime = Math.max(playbackContext.currentTime, nextStartTimeRef.current);
-    source.start(startTime);
-    nextStartTimeRef.current = startTime + audioBuffer.duration;
+async def get_answer(
+    question: str, history: list[HistoryItem] | None = None
+) -> tuple[str, list[str], str | None]:
+    """بترجع (answer, images, audio_url). audio_url بيبقى None في الحالات
+    العادية، وبيتحدد بس لما تريجر خاص (زي ترحيب البابا) يشتغل في
+    rag.answer_question ويرجع رابط صوت جاهز بدل ما يمر على الـ LLM."""
+    print("Question:", question)
 
-    activeSourcesRef.current.push(source);
-    source.onended = () => {
-      activeSourcesRef.current = activeSourcesRef.current.filter((s) => s !== source);
-    };
-  }, []);
+    history_dicts = [item.model_dump() for item in history] if history else []
 
-  /** بتشغّل رابط صوت جاهز (MP3 من Cloudinary مثلاً، زي لحن الترحيب) عبر
-   *  نفس الـ AudioContext المفتوح أصلاً للمكالمة - مش عنصر <audio> جديد
-   *  منفصل، عشان نتجنب قيود الـ autoplay على الموبايل اللي بتمنع تشغيل
-   *  عنصر <audio> جديد من غير user gesture مباشر مرتبط بيه. */
-  const playAudioUrl = useCallback(async (url: string) => {
-    stopPlayback();
+    answer, images, audio_url = await asyncio.to_thread(
+        rag.answer_question,
+        question,
+        history_dicts
+    )
 
-    const playbackContext = playbackContextRef.current;
-    if (!playbackContext) {
-      console.error('No playback context available to play hymn URL');
-      setStatus('listening');
-      return;
-    }
+    print("Answer:", answer)
+    if images:
+        print("Images:", images)
+    if audio_url:
+        print("Audio URL:", audio_url)
 
-    setStatus('speaking');
-    isPlayingUrlRef.current = true;
+    return answer, images, audio_url
 
-    try {
-      if (playbackContext.state === 'suspended') {
-        await playbackContext.resume();
-      }
 
-      const response = await fetch(url);
-      const arrayBuffer = await response.arrayBuffer();
-      const audioBuffer = await playbackContext.decodeAudioData(arrayBuffer);
+# =========================
+# Models
+# =========================
 
-      const source = playbackContext.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(playbackContext.destination);
+class TTSRequest(BaseModel):
+    text: str
 
-      source.onended = () => {
-        activeSourcesRef.current = activeSourcesRef.current.filter((s) => s !== source);
-        isPlayingUrlRef.current = false;
-        setStatus('listening');
-      };
 
-      const startTime = Math.max(playbackContext.currentTime, nextStartTimeRef.current);
-      activeSourcesRef.current.push(source);
-      source.start(startTime);
-      nextStartTimeRef.current = startTime + audioBuffer.duration;
-    } catch (err) {
-      console.error('Failed to play hymn URL:', url, err);
-      isPlayingUrlRef.current = false;
-      setStatus('listening');
-    }
-  }, [stopPlayback]);
+# =========================
+# Health
+# =========================
 
-  /** بتاخد النص النهائي اللي اتجمع وتبعته للسيرفر كـ نص جاهز (مش صوت) */
-  const sendFinalTranscript = useCallback(() => {
-    const text = transcriptBufferRef.current.trim();
-    transcriptBufferRef.current = '';
+@router.get("/health", response_model=HealthResponse)
+async def health_check():
+    return HealthResponse(status="ok")
 
-    if (!text) return;
 
-    onTranscript(text);
+# =========================
+# Debug - مؤقت، نشيله بعد ما نحل مشكلة الصوت
+# =========================
 
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'user_text', text }));
-    }
-  }, [onTranscript]);
+@router.get("/debug/last-call-audio")
+async def debug_last_call_audio():
+    path = "/tmp/last_call_utterance.wav"
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="No call audio recorded yet")
+    return FileResponse(path, media_type="audio/wav", filename="last_call_utterance.wav")
 
-  /** بتبدأ جلسة SpeechRecognition جديدة (نفس منطق useVoice.ts) */
-  const startRecognition = useCallback(() => {
-    transcriptBufferRef.current = '';
-    isStoppingRef.current = false;
-    lastFinalIndexRef.current = -1;
-    clearRestartTimeout();
 
-    const SpeechRecognitionImpl =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
+# =========================
+# Chat
+# =========================
 
-    if (!SpeechRecognitionImpl) {
-      setErrorMsg('المتصفح لا يدعم التعرف على الصوت');
-      setStatus('error');
-      return;
-    }
+@router.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    if not request.message.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Message cannot be empty"
+        )
 
-    const recognition = new SpeechRecognitionImpl();
-    recognition.lang = 'ar-EG';
-    recognition.continuous = true;
-    recognition.interimResults = true;
+    try:
+        answer, images, audio_url = await get_answer(request.message, request.history)
 
-    recognition.onstart = () => setStatus('listening');
+        return ChatResponse(answer=answer, images=images, audio_url=audio_url)
 
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      const startIndex = Math.max(event.resultIndex, lastFinalIndexRef.current + 1);
+    except Exception:
+        traceback.print_exc()
 
-      let finalChunk = '';
-      for (let i = startIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-        if (result.isFinal) {
-          finalChunk += result[0].transcript;
-          lastFinalIndexRef.current = i;
+        raise HTTPException(
+            status_code=500,
+            detail="Chat failed"
+        )
+
+
+# =========================
+# TTS Endpoint
+# =========================
+
+@router.post("/tts")
+async def tts_endpoint(request: TTSRequest):
+    try:
+        audio_data = await _gemini_text_to_speech(request.text)
+
+        return StreamingResponse(
+            io.BytesIO(audio_data),
+            media_type="audio/pcm"
+        )
+    except Exception:
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=500,
+            detail="TTS Failed"
+        )
+
+
+@router.post("/voice")
+async def voice(audio: UploadFile = File(...)):
+    try:
+        audio_bytes = await audio.read()
+
+        question = await asyncio.to_thread(
+            _speech_to_text,
+            audio_bytes
+        )
+
+        if not question:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not transcribe audio"
+            )
+
+        answer_text, images, audio_url = await get_answer(question)
+
+        return {
+            "transcript": question,
+            "answer": answer_text,
+            "images": images,
+            "audio_url": audio_url,
         }
-      }
-      if (finalChunk) {
-        const deduped = stripOverlap(transcriptBufferRef.current, finalChunk);
-        if (deduped) {
-          transcriptBufferRef.current += deduped + ' ';
-        }
-      }
-    };
 
-    let fatalError = false;
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail="Voice Failed"
+        )
 
-    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      if (FATAL_ERRORS.has(event.error)) {
-        // إيرور حقيقي مفيش منه رجوع (زي رفض إذن الميكروفون) - هنا فقط
-        // نوقف المكالمة فعليًا ونوريها للمستخدم
-        fatalError = true;
-        isStoppingRef.current = true;
-        setErrorMsg('تعذر التعرف على الصوت - يرجى السماح باستخدام الميكروفون والمحاولة مرة أخرى');
-        setStatus('error');
-        return;
-      }
 
-      // أي إيرور تاني (no-speech, audio-capture, network, aborted،
-      // إلخ) بنعتبره مؤقت وبنسيب onend يعمل إعادة تشغيل تلقائية بعد
-      // شوية - من غير ما نوقف السمع أو نظهر رسالة إيرور للمستخدم
-      console.warn('Speech recognition non-fatal error:', event.error);
-    };
+# =========================
+# Real-time Call (WebSocket)
+# =========================
+#
+# بروتوكول المكالمة الفورية بين العميل (useCall.ts) والسيرفر ده:
+#
+# Client → Server:
+#   - {"type": "user_text", "text": "..."}   المستخدم خلص كلامه، والنص
+#     ده جاهز فعلاً (اتعرّف عليه في المتصفح بـ Web Speech API - مفيش
+#     STT جوه السيرفر تاني لمسار المكالمة)
+#   - {"type": "start_turn"}   المستخدم بدأ يتكلم من جديد (ممكن تكون
+#     مقاطعة/barge-in لو كان في رد شغال)
+#
+# Server → Client:
+#   - {"type": "interrupted"}
+#   - {"type": "processing"}
+#   - {"type": "answer_text", "text": "..."}
+#   - {"type": "tts_loading"}   جديد: النص وصل وظهر في الشات، بس الصوت
+#     لسه بيتولّد من Gemini (مكالمة non-streaming بتاخد وقت). العميل
+#     يقدر يعرض indicator ("بيجهز الصوت...") لحد ما answer_audio_start توصل.
+#   - {"type": "answer_audio_start"}
+#   - Binary frames: صوت PCM16 خام 24kHz mono على شرائح ~100ms
+#   - {"type": "answer_audio_end"}
+#   - {"type": "play_url", "url": "..."}   جديد: لما الرد عبارة عن رابط
+#     صوت جاهز (زي لحن ترحيب البابا) بدل PCM متولّد من TTS - العميل
+#     يشغّله مباشرة بـ Audio API عادي، مش عبر مسار الـ PCM streaming.
 
-    recognition.onend = () => {
-      if (!isStoppingRef.current && !fatalError) {
-        clearRestartTimeout();
-        restartTimeoutRef.current = setTimeout(() => {
-          try {
-            lastFinalIndexRef.current = -1;
-            recognition.start();
-          } catch {
-            sendFinalTranscript();
-          }
-        }, 250);
-        return;
-      }
 
-      sendFinalTranscript();
-    };
+async def _process_question(
+    websocket: WebSocket,
+    question: str,
+    call_state: dict,
+) -> None:
+    try:
+        await websocket.send_json({"type": "processing"})
 
-    recognitionRef.current = recognition;
-    recognition.start();
-  }, [sendFinalTranscript]);
+        answer_text, images, audio_url = await get_answer(question)
 
-  const startCall = useCallback(async () => {
-    if (
-      wsRef.current !== null ||
-      status === 'connecting' ||
-      status === 'listening' ||
-      status === 'processing' ||
-      status === 'speaking'
-    ) {
-      console.warn('Call already active or connecting — ignoring duplicate startCall');
-      return;
-    }
+        if images:
+            await websocket.send_json({"type": "images", "images": images})
 
-    setErrorMsg(null);
-    setStatus('connecting');
-    setIsMicMuted(false);
+        await websocket.send_json({"type": "answer_text", "text": answer_text})
 
-    // بننشئ الـ AudioContext ونعمله resume هنا فورًا - جوه نفس الـ call
-    // stack المتزامن بتاع ضغطة المستخدم على الزرار (قبل أي await لفتح
-    // الـ WebSocket). ده ضروري على iOS Safari وبعض متصفحات الموبايل
-    // عشان الصوت يتحسب "unlocked" فعليًا ولو اتشغل بعدين بشكل غير متزامن
-    // (زي لحن الترحيب اللي بيوصل عبر رسالة WebSocket لاحقة).
-    try {
-      playbackContextRef.current = new AudioContext({
-        sampleRate: PLAYBACK_SAMPLE_RATE,
-      });
-      await playbackContextRef.current.resume();
-      nextStartTimeRef.current = 0;
-    } catch {
-      setErrorMsg('لا يمكن تفعيل الصوت على هذا الجهاز.');
-      setStatus('error');
-      return;
-    }
+        # النص وصل وظهر في الشات فورًا، بس Gemini TTS لسه هياخد وقت
+        # (مش streaming - بيرجع الصوت كامل مرة واحدة). بنبلغ العميل إنه
+        # يدخل حالة "بيجهز الصوت" بدل ما يفضل واقف ساكت لحد ما الصوت يوصل
+        await websocket.send_json({"type": "tts_loading"})
 
-    try {
-      const ws = new WebSocket(WS_URL);
-      ws.binaryType = 'arraybuffer';
-      wsRef.current = ws;
+        # لو فيه رابط صوت جاهز (تريجر خاص زي ترحيب البابا)، لازم الأول
+        # نقول نص الترحيب فعليًا بالـ TTS العادي، وبس بعد ما ينتهي فعليًا
+        # (مش مجرد بعد ما نبعت آخر chunk) نبعت play_url للحن. لو بعتنا
+        # play_url بدري، playAudioUrl في العميل بيعمل stopPlayback() أول
+        # حاجة، وده هيقطع صوت الترحيب لو لسه بيتشغل فعليًا عند العميل.
+        if audio_url:
+            greeting_audio = await _gemini_text_to_speech(answer_text)
+            print("Greeting audio bytes:", len(greeting_audio))
 
-      ws.onopen = () => {
-        startRecognition();
-      };
+            await websocket.send_json({"type": "answer_audio_start"})
+            call_state["speaking"] = True
 
-      ws.onmessage = (event: MessageEvent) => {
-        if (typeof event.data === 'string') {
-          const msg = JSON.parse(event.data);
+            for i in range(0, len(greeting_audio), GEMINI_AUDIO_CHUNK_BYTES):
+                chunk = greeting_audio[i:i + GEMINI_AUDIO_CHUNK_BYTES]
+                await websocket.send_bytes(chunk)
+                await asyncio.sleep(0)
 
-          switch (msg.type) {
-            case 'interrupted':
-              stopPlayback();
-              setStatus('listening');
-              break;
+            await websocket.send_json({"type": "answer_audio_end"})
 
-            case 'processing':
-              setStatus('processing');
-              break;
+            # مدة صوت الترحيب الفعلية (samples / sample_rate) - بننتظرها
+            # عشان نضمن إن التشغيل عند العميل خلص فعلاً قبل ما نبعت
+            # play_url، لأن playAudioUrl بتعمل stopPlayback() أول حاجة
+            num_samples = len(greeting_audio) // 2  # PCM16 = 2 bytes/sample
+            greeting_duration = num_samples / GEMINI_TTS_SAMPLE_RATE
+            await asyncio.sleep(greeting_duration)
 
-            case 'answer_text':
-              onAnswer(msg.text as string);
-              break;
+            await websocket.send_json({"type": "play_url", "url": audio_url})
+            return
 
-            case 'answer_audio_start':
-              setStatus('speaking');
-              break;
+        audio_data = await _gemini_text_to_speech(answer_text)
+        print("Audio bytes:", len(audio_data))
 
-            case 'answer_audio_end':
-              // لو لحن/رابط صوت جاهز شغال دلوقتي (زي ترحيب البابا)،
-              // متسبقهوش تقفل الـ status - onended بتاعه هو اللي يقرر
-              if (!isPlayingUrlRef.current) {
-                setStatus('listening');
-              }
-              break;
+        await websocket.send_json({"type": "answer_audio_start"})
+        call_state["speaking"] = True
 
-            case 'play_url':
-              playAudioUrl(msg.url as string);
-              break;
+        for i in range(0, len(audio_data), GEMINI_AUDIO_CHUNK_BYTES):
+            chunk = audio_data[i:i + GEMINI_AUDIO_CHUNK_BYTES]
+            await websocket.send_bytes(chunk)
+            await asyncio.sleep(0)
 
-            case 'error':
-              setErrorMsg(msg.message as string);
-              setStatus('error');
-              break;
-          }
-        } else {
-          scheduleAudioChunk(event.data as ArrayBuffer);
-        }
-      };
+        await websocket.send_json({"type": "answer_audio_end"})
 
-      ws.onerror = () => {
-        setErrorMsg('تعذر الاتصال بالخادم.');
-        setStatus('error');
-      };
+    except asyncio.CancelledError:
+        raise
 
-      ws.onclose = () => {
-        setStatus((prev) => (prev === 'idle' ? prev : 'idle'));
-      };
-    } catch {
-      setErrorMsg('تعذر بدء المكالمة.');
-      setStatus('error');
-    }
-  }, [status, onAnswer, scheduleAudioChunk, startRecognition, stopPlayback, playAudioUrl]);
+    except Exception:
+        traceback.print_exc()
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": "حصل خطأ أثناء معالجة الرد"
+            })
+        except Exception:
+            pass
 
-  const endCall = useCallback(() => {
-    stopPlayback();
+    finally:
+        call_state["speaking"] = False
 
-    isStoppingRef.current = true;
-    clearRestartTimeout();
-    recognitionRef.current?.stop();
-    recognitionRef.current = null;
 
-    playbackContextRef.current?.close();
-    playbackContextRef.current = null;
+@router.websocket("/ws/call")
+async def call_websocket(websocket: WebSocket):
+    await websocket.accept()
 
-    wsRef.current?.close();
-    wsRef.current = null;
+    current_task: asyncio.Task | None = None
+    call_state = {"speaking": False}
 
-    setStatus('idle');
-    setErrorMsg(null);
-    setIsMicMuted(false);
-  }, [stopPlayback]);
+    try:
+        while True:
+            message = await websocket.receive()
 
-  /** زرار واحد بيتحكم في كل حاجة - زي زرار تسجيل/إرسال الفويس نوت:
-   *  - بيدوس يبدأ يتكلم (unmute): بيشغّل SpeechRecognition من جديد. لو
-   *    المساعد كان بيتكلم لسه، ده يعتبر مقاطعة (barge-in) - بنوقف صوته
-   *    فورًا محليًا وبنبلغ السيرفر.
-   *  - بيدوس تاني لما يخلص كلامه (mute): بيوقف SpeechRecognition، وبمجرد
-   *    ما يوصل النص النهائي بيتبعت للسيرفر كنص جاهز (STT خلص في المتصفح). */
-  const toggleMic = useCallback(() => {
-    const goingToMuted = !isMicMuted;
-    setIsMicMuted(goingToMuted);
+            if message.get("type") == "websocket.disconnect":
+                break
 
-    if (goingToMuted) {
-      // خلص كلامه - أوقفي SpeechRecognition؛ onend هيبعت النص تلقائيًا
-      isStoppingRef.current = true;
-      clearRestartTimeout();
-      recognitionRef.current?.stop();
-    } else {
-      // بدأ يتكلم من جديد - وقفي أي صوت شغال محليًا فورًا وبلغي السيرفر
-      stopPlayback();
-      setStatus('listening');
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: 'start_turn' }));
-      }
-      startRecognition();
-    }
-  }, [isMicMuted, stopPlayback, startRecognition]);
+            if message.get("text") is not None:
+                try:
+                    control = json.loads(message["text"])
+                except (TypeError, json.JSONDecodeError):
+                    continue
 
-  return {
-    status,
-    startCall,
-    endCall,
-    toggleMic,
-    isMicMuted,
-    isCallActive: status !== 'idle',
-    errorMsg,
-  };
-}
+                msg_type = control.get("type")
+
+                if msg_type == "user_text":
+                    # المستخدم خلص كلامه، والنص جاهز فعلاً (Web Speech API
+                    # في المتصفح) - نبدأ المعالجة (LLM -> TTS) على طول
+                    question = (control.get("text") or "").strip()
+
+                    if not question:
+                        continue
+
+                    if current_task is not None and not current_task.done():
+                        print("Previous response still in progress - ignoring this utterance")
+                        continue
+
+                    print(f"Call question received: {question!r}")
+                    current_task = asyncio.create_task(
+                        _process_question(websocket, question, call_state)
+                    )
+
+                elif msg_type == "start_turn":
+                    # المستخدم بدأ يتكلم من جديد - لو المساعد كان لسه بيتكلم
+                    # أو بيعالج، ده barge-in فعلي: نلغي أي حاجة شغالة فورًا
+                    if current_task is not None and not current_task.done():
+                        print("Barge-in: cancelling in-progress response")
+                        await websocket.send_json({"type": "interrupted"})
+                        current_task.cancel()
+                        current_task = None
+
+                    call_state["speaking"] = False
+
+                continue
+
+            # مفيش بث صوت خام تاني في مسار المكالمة - التعرف على الصوت
+            # بيحصل بالكامل في المتصفح (Web Speech API)، فأي bytes وصلت
+            # هنا (لو حصل) بيتم تجاهلها
+
+    except WebSocketDisconnect:
+        pass
+
+    finally:
+        if current_task is not None and not current_task.done():
+            current_task.cancel()
