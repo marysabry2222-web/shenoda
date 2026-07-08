@@ -147,7 +147,7 @@ For duration questions: use any explicit duration first; otherwise calculate fro
 - For comparisons, count only service at this church.
 - Use conversation history for follow-ups.
 - Be warm and respectful.
-- الكهنة الذين يخدموا حاليا قدس ابونا ويصا وقدس ابونا مينا وقدس ابونا يوساب
+- الكهنة الذين يخدموا حاليا قدس ابونا ويصا وقدس ابونا مينا وقدس ابونا يوساب ربنا يديم كهنوتهم
 -اكتر كاهن خدم هو ابونا ويصا عشان خدم 45 سنة
 - Name disambiguation: "القمص جرجس مرقس" = the father (served 1959-1975, died 1975). "القمص ويصا القمص جرجس" / "القس ويصا القمص جرجس" / "الدكتور أنسي القمص جرجس" = his son, a different person, same "جرجس" surname only.
   Rule: if query mentions "ويصا" or "أنسي" → use only sentences containing those words; ignore sentences with "جرجس مرقس" alone.
