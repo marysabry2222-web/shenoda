@@ -349,42 +349,6 @@ TOPIC_KEYWORDS: dict[str, dict] = {
         "folders": ["زيارات البطاركة/البابا تواضروس 2015"],
     },
 
-    "خدمات الكنيسة": {
-        "phrases": {
-            "خدمات الكنيسه",
-        },
-        "tokens": {
-            "خدمات",
-        },
-        "folders": ["خدمات"],
-    },
-
-    "تعمير/نشأة/تاريخ الكنيسة": {
-        "phrases": {
-            "تاريخ الكنيسه",
-            "نشاه الكنيسه",
-            "قصه الكنيسه",
-            "تعمير الكنيسه",
-        },
-        "tokens": set(),
-        "any_tokens": {
-            "نشاه",
-            "تعمير",
-            "بناء",
-            "تاسيس",
-            "قصه",
-            "تاريخ",
-            "حكايه",
-            "القديمه",
-        },
-        "folders": [
-            "صور كنيسة القديمة من 77 ل 2007",
-            "الكنيسة الحالية قبل التعمير من 2012 الي 2024",
-            "كنيسة خارجي 90",
-        ],
-    },
-}
-
 
 def _normalize_arabic(text: str) -> str:
     text = re.sub(r"[إأآا]", "ا", text)
@@ -691,6 +655,39 @@ _FEWSHOT_ANSWER_2 = (
     "سنة 1957/1958."
 )
 
+# FEWSHOT_EXAMPLES: list[dict] = [
+#     {
+#         "role": "user",
+#         "content": (
+#             f"Church knowledge base:\n{_FEWSHOT_CONTEXT_1}\n\n"
+#             "Question: مين صاحب فكرة بناء الكنيسة؟\n\nAnswer in Arabic only."
+#         ),
+#     },
+#     {"role": "assistant", "content": _FEWSHOT_ANSWER_1},
+#     {
+#         "role": "user",
+#         "content": (
+#             f"Church knowledge base:\n{_FEWSHOT_CONTEXT_1}\n\n"
+#             "Question: كيف بدأت الخدمة في القباري؟\n\nAnswer in Arabic only."
+#         ),
+#     },
+#     {"role": "assistant", "content": _FEWSHOT_ANSWER_2},
+# ]
+_FEWSHOT_CONTEXT_2 = (
+    "[زيارات قداسة البابا تواضروس الثاني للكنيسة]\n"
+    "قبل أن يصير بطريركًا، كان نيافة الأنبا تواضروس أسقفًا عامًّا، وزار الكنيسة "
+    "مرات كثيرة في نهضات الأنبا شنودة. وبعد أن صار بطريركًا، زار الكنيسة يوم "
+    "الأربعاء الموافق 30/12/2014 برفقة خمسة أساقفة، وألقى العظة الأسبوعية، ووعد "
+    "بتدشين الكنيسة. وقد تم تنفيذ هذا الوعد يوم 9 شهر سبعة، حيث زار قداسته "
+    "الكنيسة مرة أخرى وحضر التدشين."
+)
+_FEWSHOT_ANSWER_3 = (
+    "قداسة البابا تواضروس الثاني زار الكنيسة عدة مرات؛ كان أسقفًا عامًّا فزارها "
+    "كثيرًا في نهضات الأنبا شنودة، ثم زارها بصفته بطريركًا في الأربعاء 30/12/2014 "
+    "مع خمسة أساقفة، حيث ألقى العظة الأسبوعية ووعد بتدشينها. وقد تم تنفيذ الوعد "
+    "يوم 9 شهر سبعة وقداسته زارنا."
+)
+
 FEWSHOT_EXAMPLES: list[dict] = [
     {
         "role": "user",
@@ -708,9 +705,15 @@ FEWSHOT_EXAMPLES: list[dict] = [
         ),
     },
     {"role": "assistant", "content": _FEWSHOT_ANSWER_2},
+    {
+        "role": "user",
+        "content": (
+            f"Church knowledge base:\n{_FEWSHOT_CONTEXT_2}\n\n"
+            "Question: كم مرة زار قداسة البابا تواضروس الكنيسة؟\n\nAnswer in Arabic only."
+        ),
+    },
+    {"role": "assistant", "content": _FEWSHOT_ANSWER_3},
 ]
-
-
 def _build_messages(question: str, context: str, history: list[dict] | None) -> list[dict]:
     messages = [{"role": "system", "content": _system_prompt()}]
     messages.extend(FEWSHOT_EXAMPLES)
