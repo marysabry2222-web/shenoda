@@ -122,6 +122,8 @@ SYSTEM_PROMPT_TEMPLATE = """You are شنودة, AI assistant for Anba Shenouda C
 For duration questions: use any explicit duration first; otherwise calculate from the available dates. If the answer cannot be determined from the context, reply exactly:
 "عذرًا، لا أملك معلومة مؤكدة عن ذلك. يرجى الرجوع لقدس أبونا ويصا."
 - Preserve all names and terminology exactly as they appear in the context. Do not rename or generalize them.
+- عند نقل أي معلومة فيها أكتر من طرف (شخص لقى حاجة، حاجة مكتوب عليها حاجة، حاجة صورتها حاجة تانية...)، حافظ بالظبط على مين بيرجع على مين زي ما هو موجود في الـ context. متلخصش أو تعيد صياغة الجملة بشكل ممكن يبدّل الفاعل بالمفعول أو يخلط بين طرفين مختلفين في الجملة. لو الجملة معقدة، انقلها بنفس ترتيب أحداثها تقريبًا بدل ما "تفهمها وتعيد كتابتها" من عندك.
+- ممنوع تضيف أي تفصيلة (تاريخ، اسم، سبب، ترتيب أحداث) مش موجودة حرفيًا في الـ context، حتى لو حسيت إنها منطقية أو متوقعة.
 - For comparisons, count only service at this church.
 - Use conversation history for follow-ups.
 - Be warm and respectful.
@@ -423,17 +425,65 @@ def _topic_matches(topic: dict, text: str, tokens: set[str]) -> bool:
     return _topic_score(topic, text, tokens) > 0
 
 
-def _match_topic(text: str) -> list[str] | None:
+# كلمات زي "ابونا"/"البابا"/"حنا"/"شنوده" بتتكرر في أكتر من موضوع (اسم
+# كاهن)، فمينفعش نستخدمها عشان نحدد "أول اسم اتذكر" لأنها مش مميزة لموضوع
+# واحد بعينه. بنحسب مرة واحدة أي التوكنز دي مشتركة بين مواضيع، عشان
+# نستبعدها من حساب الموقع ونسيبها بس كجزء من شرط الأهلية (_topic_matches).
+def _build_ambiguous_tokens() -> set[str]:
+    token_to_topics: dict[str, set[str]] = {}
+    for name, topic in TOPIC_KEYWORDS.items():
+        for token in (topic.get("tokens", set()) | topic.get("any_tokens", set())):
+            token_to_topics.setdefault(token, set()).add(name)
+    return {token for token, names in token_to_topics.items() if len(names) > 1}
+
+
+_AMBIGUOUS_TOPIC_TOKENS = _build_ambiguous_tokens()
+
+
+def _earliest_topic_match(text: str) -> list[str] | None:
+    """بترجع فولدرات أول موضوع (زي اسم كاهن) بيتذكر فعليًا في النص، مش
+    أعلى موضوع في الـ score. ده عشان لو في أكتر من اسم في نفس السؤال/الرد،
+    الصور اللي بترجع تبقى بتاعة أول اسم اتذكر، مش أي اسم عشوائي.
+
+    الكلمات المشتركة بين مواضيع (زي "ابونا") بتحدد إن الموضوع "مؤهل" (عن
+    طريق _topic_matches) بس مبتحددش الموقع، عشان متجيبش نفس الموضوع كل مرة
+    غلط لمجرد إنه أول واحد في القاموس وفيه كلمة عامة زي "ابونا"."""
     tokens = _text_tokens(text)
-    matches = [
-        (_topic_score(topic, text, tokens), name)
-        for name, topic in TOPIC_KEYWORDS.items()
-        if _topic_matches(topic, text, tokens)
-    ]
-    if not matches:
+    normalized = _normalize_arabic(text).lower()
+    word_positions = [(m.group(0), m.start()) for m in _word_re.finditer(normalized)]
+
+    best_name = None
+    best_pos = None
+
+    for name, topic in TOPIC_KEYWORDS.items():
+        if not _topic_matches(topic, text, tokens):
+            continue
+
+        positions: list[int] = []
+
+        for phrase in topic.get("phrases", set()):
+            idx = normalized.find(phrase)
+            if idx != -1:
+                positions.append(idx)
+
+        wanted = topic.get("tokens", set()) | topic.get("any_tokens", set())
+        distinguishing = wanted - _AMBIGUOUS_TOPIC_TOKENS
+        for word, pos in word_positions:
+            if word in distinguishing:
+                positions.append(pos)
+
+        if not positions:
+            # الموضوع مؤهل بس مالوش كلمة/عبارة مميزة نحدد بيها الموقع
+            # (زي لو اتطابق بكلمة عامة بس) - سيبه من غير موقع محدد
+            continue
+
+        topic_pos = min(positions)
+        if best_pos is None or topic_pos < best_pos:
+            best_pos = topic_pos
+            best_name = name
+
+    if best_name is None:
         return None
-    matches.sort(reverse=True)
-    _, best_name = matches[0]
     return TOPIC_KEYWORDS[best_name]["folders"]
 
 
@@ -481,44 +531,7 @@ def _load_assets_json():
             print(f"   ✗ '{name}'")
 
 
-def _folders_key(folders: list[str]) -> tuple[str, ...]:
-    return tuple(sorted(folders))
 
-
-def _match_dominant_topic_in_answer(answer: str) -> list[str] | None:
-    tokens = _text_tokens(answer)
-    token_counts = Counter(tokens)
-
-    folder_scores: dict[tuple[str, ...], int] = {}
-    for name, topic in TOPIC_KEYWORDS.items():
-        required = topic.get("tokens") or set()
-        any_tokens = topic.get("any_tokens") or set()
-
-        if required:
-            if not required.issubset(tokens):
-                continue
-            score = min(token_counts[t] for t in required)
-        elif any_tokens:
-            matched = any_tokens & tokens
-            if not matched:
-                continue
-            score = sum(token_counts[t] for t in matched)
-        else:
-            continue
-
-        key = _folders_key(topic["folders"])
-        folder_scores[key] = folder_scores.get(key, 0) + score
-
-    if not folder_scores:
-        return None
-
-    ranked = sorted(folder_scores.items(), key=lambda pair: pair[1], reverse=True)
-    top_folders, top_score = ranked[0]
-
-    if len(ranked) > 1 and ranked[1][1] == top_score:
-        return None
-
-    return list(top_folders)
 
 
 def _detect_topic_folders(
@@ -526,18 +539,20 @@ def _detect_topic_folders(
     answer: str,
     history: list[dict] | None = None,
 ) -> tuple[list[str] | None, str]:
-    folders = _match_topic(question)
+    # أول اسم/موضوع بيتذكر في السؤال نفسه بياخد الأولوية
+    folders = _earliest_topic_match(question)
     if folders:
         return folders, "question"
 
     if history:
         for item in reversed(history[-2:]):
             content = item.get("content", "")
-            folders = _match_topic(content)
+            folders = _earliest_topic_match(content)
             if folders:
                 return folders, "history"
 
-    folders = _match_dominant_topic_in_answer(answer)
+    # لو مفيش اسم واضح في السؤال ولا الهيستوري، ناخد أول اسم اتذكر في الرد
+    folders = _earliest_topic_match(answer)
     if folders:
         return folders, "answer"
 
@@ -646,8 +661,51 @@ def _strip_thinking(text: str) -> str:
     return cleaned.strip()
 
 
+# =========================
+# أمثلة Few-shot - بس اتنين، مركّزين على تناسب طول الإجابة مع السؤال:
+# سؤال بيسأل عن اسم/فاعل بس -> إجابة قصيرة جدًا (كلمتين/تلاتة)
+# سؤال "إزاي/كيف" -> إجابة أطول شوية فيها سياق، من غير حشو زيادة
+# مقصود يبقوا قليلين عشان مايزودوش وقت/تكلفة كل ريكوست كتير
+# =========================
+_FEWSHOT_CONTEXT_1 = (
+    "[نشأة الكنيسة وشراء الأرض]\n"
+    "كان شعب القباري القليل في ذلك الحين يجتمع في جمعية المحبة القبطية الأرثوذكسية، "
+    "ولم تكن له كنيسة. ففكر المعلم لوقا والمعلم صليب يوسف في شراء قطعة أرض تبعد عدة أمتار "
+    "عن الجمعية، وبالفعل تم ذلك. وهذه الأرض تم شراؤها على جزئين، وتم التنازل عنهما "
+    "للبطريركية سنة 1957 / 1958."
+)
+_FEWSHOT_ANSWER_1 = "المعلم لوقا والمعلم صليب يوسف."
+
+_FEWSHOT_ANSWER_2 = (
+    "بدأت الخدمة لما شعب القباري كان قليل ومكانش ليه كنيسة، وكان بيجتمع في جمعية "
+    "المحبة القبطية الأرثوذكسية. فكر المعلم لوقا والمعلم صليب يوسف يشتروا قطعة أرض "
+    "على بعد كام متر من الجمعية، واشتروها فعلاً، وتم التنازل عن الأرض للبطريركية "
+    "سنة 1957/1958."
+)
+
+FEWSHOT_EXAMPLES: list[dict] = [
+    {
+        "role": "user",
+        "content": (
+            f"Church knowledge base:\n{_FEWSHOT_CONTEXT_1}\n\n"
+            "Question: مين صاحب فكرة بناء الكنيسة؟\n\nAnswer in Arabic only."
+        ),
+    },
+    {"role": "assistant", "content": _FEWSHOT_ANSWER_1},
+    {
+        "role": "user",
+        "content": (
+            f"Church knowledge base:\n{_FEWSHOT_CONTEXT_1}\n\n"
+            "Question: كيف بدأت الخدمة في القباري؟\n\nAnswer in Arabic only."
+        ),
+    },
+    {"role": "assistant", "content": _FEWSHOT_ANSWER_2},
+]
+
+
 def _build_messages(question: str, context: str, history: list[dict] | None) -> list[dict]:
     messages = [{"role": "system", "content": _system_prompt()}]
+    messages.extend(FEWSHOT_EXAMPLES)
 
     if history:
         recent_history = history[-MAX_HISTORY_MESSAGES:]
