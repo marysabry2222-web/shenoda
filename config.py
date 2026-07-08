@@ -35,11 +35,7 @@ GEMINI_TTS_MODEL: str = "gemini-2.5-flash-preview-tts"
 GEMINI_TTS_VOICE: str = "puck"
 # بروميت التوجيه اللي بيتبعت مع كل نص عشان الموديل يتكلم باللهجة المصرية
 # (الموديل بيتحكم في الأسلوب باللغة الطبيعية بدل صوت ثابت مخصص للهجة)
-GEMINI_TTS_STYLE_PROMPT: str = (
-    "اتكلم باللهجة المصرية العامية، بأسلوب دافئ ومحترم وطبيعي، "
-    "زي حد بيرد على حد بيسأله في كنيسة."
-)
-
+GEMINI_TTS_STYLE_PROMPT = "قول الجملة الجاية بلهجة مصرية عامية طبيعية، بصوت هادي ومحترم يناسب سياق كنسي:"
 HF_EMBED_MODEL: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 HF_EMBED_URL: str = f"https://api-inference.huggingface.co/pipeline/feature-extraction/{HF_EMBED_MODEL}"
 
