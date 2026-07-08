@@ -206,6 +206,10 @@ GEMINI_TTS_URL = (
     f"{GEMINI_TTS_MODEL}:generateContent"
 )
 
+# نص افتراضي بديل بيتقال بالـ TTS لما Gemini يحجب الرد الأصلي (نادر،
+# لكنه بيحصل غلط مع بعض الألقاب الدينية). بيمنع سقوط المكالمة بالكامل.
+GEMINI_TTS_FALLBACK_TEXT = "تم إعداد الإجابة، برجاء قراءتها في الشات."
+
 
 def _build_gemini_tts_payload(text: str) -> dict:
     styled_text = f"{GEMINI_TTS_STYLE_PROMPT}\n\n{text}"
@@ -220,10 +224,27 @@ def _build_gemini_tts_payload(text: str) -> dict:
                 }
             },
         },
+        # الفلتر الافتراضي بيدّي false-positive أحيانًا مع ألقاب دينية
+        # عادية (أبونا، القمص، الأنبا...) وبيرجع PROHIBITED_CONTENT من
+        # غير أي سبب واضح. بنخفف الفلتر هنا لأن المحتوى كله نصوص كنسية
+        # آمنة تمامًا.
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ],
     }
 
 
-async def _gemini_text_to_speech(text: str) -> bytes:
+async def _gemini_text_to_speech(text: str) -> bytes | None:
+    """بترجع bytes الصوت (PCM16 خام) أو None لو Gemini حجب المحتوى أو
+    رجّع استجابة غير متوقعة (زي blockReason من غير candidates).
+
+    مهم: أي كود بيستدعيها لازم يتعامل مع رجوع None بشكل صريح (يكمل
+    من غير صوت، أو يجرب fallback نص بديل) بدل ما يفترض إنها هترجع
+    صوت دايمًا - وإلا الطلب كله (chat/voice/call) هيقع بسبب حجب TTS
+    مش له علاقة بصحة الإجابة نفسها."""
     print("ENTERED GEMINI TTS")
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
@@ -243,14 +264,35 @@ async def _gemini_text_to_speech(text: str) -> bytes:
         resp.raise_for_status()
         data = resp.json()
 
+    candidates = data.get("candidates")
+
+    if not candidates:
+        block_reason = data.get("promptFeedback", {}).get("blockReason")
+        print("========== GEMINI TTS BLOCKED / EMPTY ==========")
+        print("Block reason:", block_reason, "| text_len:", len(text))
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return None
+
     try:
-        b64_audio = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+        b64_audio = candidates[0]["content"]["parts"][0]["inlineData"]["data"]
     except (KeyError, IndexError):
         print("========== GEMINI TTS UNEXPECTED RESPONSE ==========")
         print(json.dumps(data, ensure_ascii=False, indent=2))
-        raise RuntimeError("Gemini TTS response missing audio data")
+        return None
 
     return base64.b64decode(b64_audio)
+
+
+async def _gemini_text_to_speech_with_fallback(text: str) -> bytes | None:
+    """زي _gemini_text_to_speech لكن لو النص الأصلي اتحجب، بتجرب مرة
+    واحدة بنص بديل عام آمن بدل ما ترجع None على طول. مفيدة في مسار
+    المكالمة حيث لازم نرجّع صوت ما مهما كان."""
+    audio = await _gemini_text_to_speech(text)
+    if audio is not None:
+        return audio
+
+    print("Retrying Gemini TTS with fallback text after block...")
+    return await _gemini_text_to_speech(GEMINI_TTS_FALLBACK_TEXT)
 
 # =========================
 # RAG / LLM
@@ -345,10 +387,20 @@ async def tts_endpoint(request: TTSRequest):
     try:
         audio_data = await _gemini_text_to_speech(request.text)
 
+        if audio_data is None:
+            # اتحجب من Gemini (أو رجّع استجابة غير متوقعة) - مش خطأ سيرفر
+            # فعلي، فبنرجّع 422 واضحة بدل 500 عشان العميل يقدر يفرّق بينهم
+            raise HTTPException(
+                status_code=422,
+                detail="Text-to-speech was blocked or returned no audio for this text"
+            )
+
         return StreamingResponse(
             io.BytesIO(audio_data),
             media_type="audio/pcm"
         )
+    except HTTPException:
+        raise
     except Exception:
         traceback.print_exc()
 
@@ -414,6 +466,8 @@ async def voice(audio: UploadFile = File(...)):
 #   - {"type": "play_url", "url": "..."}   جديد: لما الرد عبارة عن رابط
 #     صوت جاهز (زي لحن ترحيب البابا) بدل PCM متولّد من TTS - العميل
 #     يشغّله مباشرة بـ Audio API عادي، مش عبر مسار الـ PCM streaming.
+#   - {"type": "answer_audio_skipped"}   جديد: التوليد الصوتي اتحجب حتى
+#     بعد إعادة المحاولة بنص بديل - العميل يعرض النص بس من غير صوت.
 
 
 async def _process_question(
@@ -437,7 +491,16 @@ async def _process_question(
         # play_url بدري، playAudioUrl في العميل بيعمل stopPlayback() أول
         # حاجة، وده هيقطع صوت الترحيب لو لسه بيتشغل فعليًا عند العميل.
         if audio_url:
-            greeting_audio = await _gemini_text_to_speech(answer_text)
+            greeting_audio = await _gemini_text_to_speech_with_fallback(answer_text)
+
+            if greeting_audio is None:
+                # اتحجب حتى مع الـ fallback - نكمل على play_url على طول
+                # من غير صوت ترحيب، بدل ما نوقف الرد بالكامل
+                print("Greeting TTS blocked even with fallback - skipping to play_url")
+                await websocket.send_json({"type": "answer_audio_skipped"})
+                await websocket.send_json({"type": "play_url", "url": audio_url})
+                return
+
             print("Greeting audio bytes:", len(greeting_audio))
 
             await websocket.send_json({"type": "answer_audio_start"})
@@ -460,7 +523,16 @@ async def _process_question(
             await websocket.send_json({"type": "play_url", "url": audio_url})
             return
 
-        audio_data = await _gemini_text_to_speech(answer_text)
+        audio_data = await _gemini_text_to_speech_with_fallback(answer_text)
+
+        if audio_data is None:
+            # اتحجب حتى مع الـ fallback - المستخدم لسه شايف النص (answer_text
+            # اتبعت فوق بالفعل)، بس من غير صوت. أهم حاجة إن المكالمة
+            # تكمل من غير ما تقع
+            print("Answer TTS blocked even with fallback - skipping audio")
+            await websocket.send_json({"type": "answer_audio_skipped"})
+            return
+
         print("Audio bytes:", len(audio_data))
 
         await websocket.send_json({"type": "answer_audio_start"})
