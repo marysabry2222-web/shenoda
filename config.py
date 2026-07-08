@@ -29,7 +29,7 @@ ELEVENLABS_VOICE_ID: str = os.getenv("ELEVENLABS_VOICE_ID", "")
 # Gemini 3.1 Flash TTS (اللي بيستخدم في المكالمة الفورية /ws/call بس)
 # =========================
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-GEMINI_TTS_MODEL: str = "gemini-3.1-flash-tts-preview"
+GEMINI_TTS_MODEL: str = "gemini-2.5-flash-preview-tts"
 # اسم شخصية الصوت (مش اسم لغة) - القائمة الكاملة في docs جوجل.
 # ممكن تتغير لاحقًا بعد ما نسمع أكتر من واحد ونشوف أنسبهم للهجة المصرية.
 GEMINI_TTS_VOICE: str = "puck"
