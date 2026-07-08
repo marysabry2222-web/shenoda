@@ -86,25 +86,38 @@ def _build_retrieval_query(question: str, history: list[dict] | None) -> str:
                 parts.append(content)
     return " ".join(parts)
 
+
 def _retrieve_context(question: str, history: list[dict] | None = None, top_k: int = TOP_K) -> str:
+    # بترجع كل الـ chunks مجمعة كسياق كامل للموديل. القاعدة المعرفية
+    # هنا صغيرة نسبيًا (وثيقة تاريخ كنيسة واحدة)، فإرسالها كاملة أأمن
+    # من فلترة BM25 top-k اللي ممكن تفوّت جزء مهم من المعلومة وتسبب
+    # هلوسة أو إجابة ناقصة. لو حجم القاعدة المعرفية كبر أوي مستقبلاً
+    # وبقى فيه مشكلة تكلفة/سرعة، يبقى وقتها نرجع لفلترة BM25 (الكود
+    # القديم موجود تحت كـ نسخة بديلة).
     return "\n\n---\n\n".join(_chunks)
+
+
+# -------------------------------------------------------------------
+# نسخة بديلة (BM25 top-k) - استخدمها بدل النسخة اللي فوق لو حبيتي تقللي
+# حجم الـ context المرسل للموديل بدل إرساله كامل في كل مرة:
+# -------------------------------------------------------------------
 # def _retrieve_context(question: str, history: list[dict] | None = None, top_k: int = TOP_K) -> str:
 #     if not _chunk_token_lists:
 #         _build_bm25_index()
-
+#
 #     retrieval_query = _build_retrieval_query(question, history)
 #     query_tokens = _tokenize(retrieval_query)
-
+#
 #     scores = [
 #         (_bm25_score(query_tokens, i), i) for i in range(len(_chunks))
 #     ]
 #     scores.sort(key=lambda pair: pair[0], reverse=True)
-
+#
 #     top_indices = [i for score, i in scores[:top_k] if score > 0]
-
+#
 #     if not top_indices:
 #         top_indices = list(range(min(top_k, len(_chunks))))
-
+#
 #     selected = [_chunks[i] for i in top_indices]
 #     return "\n\n---\n\n".join(selected)
 
@@ -148,23 +161,13 @@ def _system_prompt() -> str:
 # =========================
 # تريجر ترحيب البابا (عند ذكر "معاك قداسة البابا" أو "البابا تواضروس")
 # =========================
-# ده مش جزء من الـ RAG/LLM - بيتفحص قبل أي استرجاع أو نداء API، فبيوفر
-# وقت وتوكنز، وبيرجع رد ثابت + رابط لحن صوتي بدل ما يستنى رد من الموديل.
-# بدل مطابقة substring حرفية (كانت بتفشل مع أي اختلاف بسيط من الـ STT
-# في ترتيب الكلمات أو المسافات)، بنتأكد إن "البابا" + حاجة من أسماء
-# تواضروس موجودين كـ tokens منفصلين في أي مكان في الجملة
 PAPAL_GREETING_PHRASES = {
     "معاك قداسة البابا",
     "معاك قداسه البابا",
     "معاك كراسة البابا ",
 }
-# لازم الكلمات التلاتة دي كلها تكون موجودة كـ tokens منفصلة في السؤال
-# (بعد التطبيع: "قداسة" -> "قداسه") عشان نفرّق بين تحية فعلية
-# ("معاك قداسة البابا...") وبين سؤال عادي بيدي اسم البابا بس
-# ("البابا تواضروس زار الكنيسة امتى؟")
 # PAPAL_GREETING_REQUIRED_TOKENS = {"معاك", "قداسه", "البابا"}
 
-PAPAL_GREETING_REPLY = "أهلًا وسهلًا يا قداسة البابا، حابين نرحب بقداستك، وهنشغل لحن أفلوجيمينوس."
 PAPAL_GREETING_REPLY = "أهلًا وسهلًا يا قداسة البابا، حابين نرحب بقداستك، وهنشغل لحن أفلوجيمينوس."
 PAPAL_HYMN_URL = "https://res.cloudinary.com/y7ev5cpa/video/upload/v1783374987/audiomass-output_fqmcn4.mp3"
 
@@ -195,8 +198,6 @@ FALLBACK_MESSAGE = "في ضغط عالي على النظام دلوقتي، مم
 MAX_RETRIES = 3
 NETWORK_ERROR_BASE_DELAY = 2
 
-# قللناها من 4 لـ 3 - عدد رسايل الهيستوري اللي بتتبعت كسياق محادثة
-# كامل لـ Groq (منفصل عن RETRIEVAL_HISTORY_WINDOW اللي لتحسين البحث بس)
 MAX_HISTORY_MESSAGES = 3
 TOPIC_KEYWORDS: dict[str, dict] = {
     "شنودة دوس": {
@@ -239,7 +240,7 @@ TOPIC_KEYWORDS: dict[str, dict] = {
             "ابونا",
         },
           "negative_tokens": {"مرقس"},
-          
+
         "folders": ["الاباء/ابونا ويصا"],
     },
 
@@ -300,7 +301,7 @@ TOPIC_KEYWORDS: dict[str, dict] = {
         "folders": ["الاباء/ابونا يوساب"],
     },
 
-  
+
 
     "البابا شنودة الثالث": {
         "phrases": {
@@ -366,9 +367,6 @@ def _normalize_arabic(text: str) -> str:
 
 
 def _text_tokens(text: str) -> set[str]:
-    """بترجع مجموعة الكلمات (بعد التطبيع العربي) من نص معين - مستخدمة
-    في مطابقة المواضيع (TOPIC_KEYWORDS)، منفصلة عن _tokenize اللي
-    بتستخدم لفهرسة BM25 وبتشيل الـ stopwords."""
     normalized = _normalize_arabic(text).lower()
     return set(_word_re.findall(normalized))
 
@@ -377,12 +375,10 @@ def _topic_score(topic: dict, text: str, tokens: set[str]) -> int:
     score = 0
     normalized = _normalize_arabic(text).lower()
 
-    # العبارات الكاملة لها أولوية
     for phrase in topic.get("phrases", set()):
         if phrase in normalized:
             score += 100
 
-    # الكلمات الأساسية
     for token in topic.get("tokens", set()):
         if token in tokens:
             score += 2
@@ -390,7 +386,6 @@ def _topic_score(topic: dict, text: str, tokens: set[str]) -> int:
         if token in tokens:
             score -= 100
 
-    # كلمات اختيارية
     for token in topic.get("any_tokens", set()):
         if token in tokens:
             score += 1
@@ -399,15 +394,9 @@ def _topic_score(topic: dict, text: str, tokens: set[str]) -> int:
 
 
 def _topic_matches(topic: dict, text: str, tokens: set[str]) -> bool:
-    """بترجع True لو الموضوع ده بيتطابق مع النص (سواء عن طريق عبارة
-    كاملة أو الكلمات الأساسية/الاختيارية)."""
     return _topic_score(topic, text, tokens) > 0
 
 
-# كلمات زي "ابونا"/"البابا"/"حنا"/"شنوده" بتتكرر في أكتر من موضوع (اسم
-# كاهن)، فمينفعش نستخدمها عشان نحدد "أول اسم اتذكر" لأنها مش مميزة لموضوع
-# واحد بعينه. بنحسب مرة واحدة أي التوكنز دي مشتركة بين مواضيع، عشان
-# نستبعدها من حساب الموقع ونسيبها بس كجزء من شرط الأهلية (_topic_matches).
 def _build_ambiguous_tokens() -> set[str]:
     token_to_topics: dict[str, set[str]] = {}
     for name, topic in TOPIC_KEYWORDS.items():
@@ -420,13 +409,6 @@ _AMBIGUOUS_TOPIC_TOKENS = _build_ambiguous_tokens()
 
 
 def _earliest_topic_match(text: str) -> list[str] | None:
-    """بترجع فولدرات أول موضوع (زي اسم كاهن) بيتذكر فعليًا في النص، مش
-    أعلى موضوع في الـ score. ده عشان لو في أكتر من اسم في نفس السؤال/الرد،
-    الصور اللي بترجع تبقى بتاعة أول اسم اتذكر، مش أي اسم عشوائي.
-
-    الكلمات المشتركة بين مواضيع (زي "ابونا") بتحدد إن الموضوع "مؤهل" (عن
-    طريق _topic_matches) بس مبتحددش الموقع، عشان متجيبش نفس الموضوع كل مرة
-    غلط لمجرد إنه أول واحد في القاموس وفيه كلمة عامة زي "ابونا"."""
     tokens = _text_tokens(text)
     normalized = _normalize_arabic(text).lower()
     word_positions = [(m.group(0), m.start()) for m in _word_re.finditer(normalized)]
@@ -452,8 +434,6 @@ def _earliest_topic_match(text: str) -> list[str] | None:
                 positions.append(pos)
 
         if not positions:
-            # الموضوع مؤهل بس مالوش كلمة/عبارة مميزة نحدد بيها الموقع
-            # (زي لو اتطابق بكلمة عامة بس) - سيبه من غير موقع محدد
             continue
 
         topic_pos = min(positions)
@@ -510,15 +490,11 @@ def _load_assets_json():
             print(f"   ✗ '{name}'")
 
 
-
-
-
 def _detect_topic_folders(
     question: str,
     answer: str,
     history: list[dict] | None = None,
 ) -> tuple[list[str] | None, str]:
-    # أول اسم/موضوع بيتذكر في السؤال نفسه بياخد الأولوية
     folders = _earliest_topic_match(question)
     if folders:
         return folders, "question"
@@ -530,7 +506,6 @@ def _detect_topic_folders(
             if folders:
                 return folders, "history"
 
-    # لو مفيش اسم واضح في السؤال ولا الهيستوري، ناخد أول اسم اتذكر في الرد
     folders = _earliest_topic_match(answer)
     if folders:
         return folders, "answer"
@@ -640,12 +615,6 @@ def _strip_thinking(text: str) -> str:
     return cleaned.strip()
 
 
-# =========================
-# أمثلة Few-shot - بس اتنين، مركّزين على تناسب طول الإجابة مع السؤال:
-# سؤال بيسأل عن اسم/فاعل بس -> إجابة قصيرة جدًا (كلمتين/تلاتة)
-# سؤال "إزاي/كيف" -> إجابة أطول شوية فيها سياق، من غير حشو زيادة
-# مقصود يبقوا قليلين عشان مايزودوش وقت/تكلفة كل ريكوست كتير
-# =========================
 _FEWSHOT_CONTEXT_1 = (
     "[نشأة الكنيسة وشراء الأرض]\n"
     "كان شعب القباري القليل في ذلك الحين يجتمع في جمعية المحبة القبطية الأرثوذكسية، "
@@ -662,24 +631,6 @@ _FEWSHOT_ANSWER_2 = (
     "سنة 1957/1958."
 )
 
-# FEWSHOT_EXAMPLES: list[dict] = [
-#     {
-#         "role": "user",
-#         "content": (
-#             f"Church knowledge base:\n{_FEWSHOT_CONTEXT_1}\n\n"
-#             "Question: مين صاحب فكرة بناء الكنيسة؟\n\nAnswer in Arabic only."
-#         ),
-#     },
-#     {"role": "assistant", "content": _FEWSHOT_ANSWER_1},
-#     {
-#         "role": "user",
-#         "content": (
-#             f"Church knowledge base:\n{_FEWSHOT_CONTEXT_1}\n\n"
-#             "Question: كيف بدأت الخدمة في القباري؟\n\nAnswer in Arabic only."
-#         ),
-#     },
-#     {"role": "assistant", "content": _FEWSHOT_ANSWER_2},
-# ]
 _FEWSHOT_CONTEXT_2 = (
     "[زيارات قداسة البابا تواضروس الثاني للكنيسة]\n"
     "قبل أن يصير بطريركًا، كان نيافة الأنبا تواضروس أسقفًا عامًّا، وزار الكنيسة "
@@ -721,6 +672,8 @@ FEWSHOT_EXAMPLES: list[dict] = [
     },
     {"role": "assistant", "content": _FEWSHOT_ANSWER_3},
 ]
+
+
 def _build_messages(question: str, context: str, history: list[dict] | None) -> list[dict]:
     messages = [{"role": "system", "content": _system_prompt()}]
     messages.extend(FEWSHOT_EXAMPLES)
@@ -743,9 +696,6 @@ def _build_messages(question: str, context: str, history: list[dict] | None) -> 
     return messages
 
 
-# =========================
-# مزوّدين مختلفين للـ LLM: Cerebras (أساسي) و Groq (fallback على مستويين)
-# =========================
 CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions"
 CEREBRAS_CHAT_MODEL = "gpt-oss-120b"
 
@@ -840,13 +790,18 @@ def _attempt_completion(
 
 
 def answer_question(question: str, history: list[dict] | None = None) -> tuple[str, list[str], str | None]:
-    # تريجر ترحيب البابا - بيتفحص الأول قبل أي RAG أو نداء LLM، عشان
-    # يبقى فوري ومايستهلكش توكنز/وقت من غير داعي
+    # تريجر ترحيب البابا - بيتفحص الأول قبل أي RAG أو نداء LLM
     if _check_papal_greeting_trigger(question, history):
         print("PAPAL GREETING TRIGGERED — skipping RAG/LLM, returning hymn directly")
         return PAPAL_GREETING_REPLY, [], PAPAL_HYMN_URL
 
-    context = (question, history)
+    # *** الإصلاح الأساسي ***
+    # كانت هنا: context = (question, history)  -> ده tuple مش سياق حقيقي،
+    # فكان بيتحول لسترينج غريب زي ('السؤال', [...history...]) ويترسل
+    # للموديل بدل محتوى الـ knowledge base الفعلي. ده كان السبب في إن
+    # الموديل بيهلوس/يجاوب غلط، لأنه أساسًا مكانش شايف أي معلومة حقيقية
+    # عن الكنيسة.
+    context = _retrieve_context(question, history)
     print("CONTEXT LENGTH (chars):", len(context))
     messages = _build_messages(question, context, history)
 
