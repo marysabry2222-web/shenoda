@@ -495,16 +495,13 @@ def _detect_topic_folders(
     answer: str,
     history: list[dict] | None = None,
 ) -> tuple[list[str] | None, str]:
+    # اتشالت خطوة البحث في الـ history (كانت بتدور في آخر رسالتين من
+    # المحادثة السابقة) لأنها كانت بترجع صور موضوع قديم اتذكر في سؤال/رد
+    # سابق، حتى لو السؤال والرد الحاليين مالهومش دعوة بيه - فبتظهر صور
+    # غلط. دلوقتي بندور بس في السؤال الحالي، وبعدين في الرد الحالي.
     folders = _earliest_topic_match(question)
     if folders:
         return folders, "question"
-
-    if history:
-        for item in reversed(history[-2:]):
-            content = item.get("content", "")
-            folders = _earliest_topic_match(content)
-            if folders:
-                return folders, "history"
 
     folders = _earliest_topic_match(answer)
     if folders:
