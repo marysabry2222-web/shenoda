@@ -35,8 +35,13 @@ const WS_URL =
 
 const PLAYBACK_SAMPLE_RATE = 24000; // نفس sample rate صوت Gemini TTS الراجع
 
-// أخطاء مؤقتة/غير قاتلة بنتجاهلها ونعيد المحاولة من غير ما نقفل الجلسة
-const RECOVERABLE_ERRORS = new Set(['no-speech', 'audio-capture', 'network']);
+// أخطاء "قاتلة" فعلاً بس - زي رفض إذن الميكروفون - دي اللي بتوقف
+// المكالمة وتوريلها رسالة إيرور للمستخدم. أي حاجة تانية (no-speech,
+// audio-capture, network, aborted, bad-grammar, language-not-supported،
+// أو أي إيرور جديد ممكن يظهر في متصفحات مختلفة) بنعتبرها مؤقتة ومنسيبش
+// المكالمة/السمع يقف بسببها؛ onend أصلاً بيعمل إعادة تشغيل تلقائية بعد
+// 250ms، فمفيش داعي نقفل الجلسة كلها على إيرور ممكن يكون عابر.
+const FATAL_ERRORS = new Set(['not-allowed', 'service-not-allowed']);
 
 /**
  * Manages a WebSocket-based real-time voice call with the assistant.
@@ -242,13 +247,20 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
     let fatalError = false;
 
     recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      if (RECOVERABLE_ERRORS.has(event.error)) {
+      if (FATAL_ERRORS.has(event.error)) {
+        // إيرور حقيقي مفيش منه رجوع (زي رفض إذن الميكروفون) - هنا فقط
+        // نوقف المكالمة فعليًا ونوريها للمستخدم
+        fatalError = true;
+        isStoppingRef.current = true;
+        setErrorMsg('تعذر التعرف على الصوت - يرجى السماح باستخدام الميكروفون والمحاولة مرة أخرى');
+        setStatus('error');
         return;
       }
-      fatalError = true;
-      isStoppingRef.current = true;
-      setErrorMsg('تعذر التعرف على الصوت');
-      setStatus('error');
+
+      // أي إيرور تاني (no-speech, audio-capture, network, aborted،
+      // إلخ) بنعتبره مؤقت وبنسيب onend يعمل إعادة تشغيل تلقائية بعد
+      // شوية - من غير ما نوقف السمع أو نظهر رسالة إيرور للمستخدم
+      console.warn('Speech recognition non-fatal error:', event.error);
     };
 
     recognition.onend = () => {
