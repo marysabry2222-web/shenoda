@@ -712,7 +712,7 @@ def _call_chat_completions(
 ) -> requests.Response:
     payload = {
         "model": model,
-        "temperature": 0.2,
+        "temperature": 0,
         "max_tokens": 500,
         "messages": messages,
     }
