@@ -86,26 +86,27 @@ def _build_retrieval_query(question: str, history: list[dict] | None) -> str:
                 parts.append(content)
     return " ".join(parts)
 
-
 def _retrieve_context(question: str, history: list[dict] | None = None, top_k: int = TOP_K) -> str:
-    if not _chunk_token_lists:
-        _build_bm25_index()
+    return "\n\n---\n\n".join(_chunks)
+# def _retrieve_context(question: str, history: list[dict] | None = None, top_k: int = TOP_K) -> str:
+#     if not _chunk_token_lists:
+#         _build_bm25_index()
 
-    retrieval_query = _build_retrieval_query(question, history)
-    query_tokens = _tokenize(retrieval_query)
+#     retrieval_query = _build_retrieval_query(question, history)
+#     query_tokens = _tokenize(retrieval_query)
 
-    scores = [
-        (_bm25_score(query_tokens, i), i) for i in range(len(_chunks))
-    ]
-    scores.sort(key=lambda pair: pair[0], reverse=True)
+#     scores = [
+#         (_bm25_score(query_tokens, i), i) for i in range(len(_chunks))
+#     ]
+#     scores.sort(key=lambda pair: pair[0], reverse=True)
 
-    top_indices = [i for score, i in scores[:top_k] if score > 0]
+#     top_indices = [i for score, i in scores[:top_k] if score > 0]
 
-    if not top_indices:
-        top_indices = list(range(min(top_k, len(_chunks))))
+#     if not top_indices:
+#         top_indices = list(range(min(top_k, len(_chunks))))
 
-    selected = [_chunks[i] for i in top_indices]
-    return "\n\n---\n\n".join(selected)
+#     selected = [_chunks[i] for i in top_indices]
+#     return "\n\n---\n\n".join(selected)
 
 
 SYSTEM_PROMPT_TEMPLATE = """You are شنودة, AI assistant for Anba Shenouda Church, Alexandria. Today: {today}
@@ -314,17 +315,6 @@ TOPIC_KEYWORDS: dict[str, dict] = {
         },
         "folders": ["زيارات البطاركة/البابا شنودة 1977"],
     },
-    "جميع الكهنة": {
-    "phrases": {
-        "جميع الكهنه",
-        "جميع الكهنة",
-        "كل الكهنه",
-        "كل الكهنة",
-        "الكهنة",
-    },
-    "tokens": set(),
-    "folders": ["الاباء/جميع الكهنة"],
-},
 
     "البابا كيرلس": {
         "phrases": {
@@ -856,7 +846,7 @@ def answer_question(question: str, history: list[dict] | None = None) -> tuple[s
         print("PAPAL GREETING TRIGGERED — skipping RAG/LLM, returning hymn directly")
         return PAPAL_GREETING_REPLY, [], PAPAL_HYMN_URL
 
-    context = _retrieve_context(question, history)
+    context = (question, history)
     print("CONTEXT LENGTH (chars):", len(context))
     messages = _build_messages(question, context, history)
 
