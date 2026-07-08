@@ -408,6 +408,9 @@ async def voice(audio: UploadFile = File(...)):
 #   - {"type": "interrupted"}
 #   - {"type": "processing"}
 #   - {"type": "answer_text", "text": "..."}
+#   - {"type": "tts_loading"}   جديد: النص وصل وظهر في الشات، بس الصوت
+#     لسه بيتولّد من Gemini (مكالمة non-streaming بتاخد وقت). العميل
+#     يقدر يعرض indicator ("بيجهز الصوت...") لحد ما answer_audio_start توصل.
 #   - {"type": "answer_audio_start"}
 #   - Binary frames: صوت PCM16 خام 24kHz mono على شرائح ~100ms
 #   - {"type": "answer_audio_end"}
@@ -430,6 +433,11 @@ async def _process_question(
             await websocket.send_json({"type": "images", "images": images})
 
         await websocket.send_json({"type": "answer_text", "text": answer_text})
+
+        # النص وصل وظهر في الشات فورًا، بس Gemini TTS لسه هياخد وقت
+        # (مش streaming - بيرجع الصوت كامل مرة واحدة). بنبلغ العميل إنه
+        # يدخل حالة "بيجهز الصوت" بدل ما يفضل واقف ساكت لحد ما الصوت يوصل
+        await websocket.send_json({"type": "tts_loading"})
 
         # لو فيه رابط صوت جاهز (تريجر خاص زي ترحيب البابا)، لازم الأول
         # نقول نص الترحيب فعليًا بالـ TTS العادي، وبس بعد ما ينتهي فعليًا
