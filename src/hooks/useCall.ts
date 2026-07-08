@@ -38,6 +38,14 @@ const PLAYBACK_SAMPLE_RATE = 24000; // نفس sample rate صوت Gemini TTS ال
 // أخطاء مؤقتة/غير قاتلة بنتجاهلها ونعيد المحاولة من غير ما نقفل الجلسة
 const RECOVERABLE_ERRORS = new Set(['no-speech', 'audio-capture', 'network']);
 
+// المدة اللي لازم تعدي من غير نص حقيقي جديد عشان نعتبر إن المستخدم خلص كلامه
+// تلقائيًا (auto end-of-turn) - بديل لضغطة زرار "خلصت الكلام" اليدوية
+const SILENCE_AUTOSEND_MS = 1200;
+
+// أقل طول نص (بعد trim) نعتبره كلام حقيقي - أقصر من كده بيتجاهل
+// (همسة/نفس/نويز بيرجع أحيانًا كـ isFinal بنص تافه أو حرف واحد)
+const MIN_VALID_CHUNK_LENGTH = 2;
+
 /**
  * Manages a WebSocket-based real-time voice call with the assistant.
  *
@@ -52,6 +60,11 @@ const RECOVERABLE_ERRORS = new Set(['no-speech', 'audio-capture', 'network']);
  *    محليًا وبنبلغ السيرفر يلغي أي رد شغال.
  *  - خلصت الكلام: بيوقف SpeechRecognition، وبمجرد ما يوصل النص النهائي
  *    بنبعته كـ نص جاهز للسيرفر (مش صوت) عشان يبدأ LLM -> TTS على طول.
+ *
+ * فوق ده، وإحنا لسه unmuted، فيه auto end-of-turn: لو عدت SILENCE_AUTOSEND_MS
+ * من غير أي نص حقيقي جديد، بنبعت النص المتجمع تلقائيًا من غير ما نستنى
+ * ضغطة الزرار - الزرار اليدوي (toggleMic) لسه شغال زي ما هو بالظبط
+ * كطريقة بديلة/يدوية لإنهاء الدور في أي وقت.
  */
 export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallReturn {
   const [status, setStatus] = useState<CallStatus>('idle');
@@ -67,6 +80,9 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
   // آخر index اتعالج فعليًا كـ isFinal جوه الجلسة الحالية (بيتصفر مع كل session جديدة/restart)
   const lastFinalIndexRef = useRef<number>(-1);
 
+  // تايمر السكوت لـ auto end-of-turn - بيتصفر بس لما يوصل نص حقيقي جديد
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const playbackContextRef = useRef<AudioContext | null>(null);
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const nextStartTimeRef = useRef(0);
@@ -80,6 +96,13 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
     if (restartTimeoutRef.current) {
       clearTimeout(restartTimeoutRef.current);
       restartTimeoutRef.current = null;
+    }
+  };
+
+  const clearSilenceTimer = () => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
     }
   };
 
@@ -185,6 +208,8 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
 
   /** بتاخد النص النهائي اللي اتجمع وتبعته للسيرفر كـ نص جاهز (مش صوت) */
   const sendFinalTranscript = useCallback(() => {
+    clearSilenceTimer();
+
     const text = transcriptBufferRef.current.trim();
     transcriptBufferRef.current = '';
 
@@ -203,6 +228,7 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
     isStoppingRef.current = false;
     lastFinalIndexRef.current = -1;
     clearRestartTimeout();
+    clearSilenceTimer();
 
     const SpeechRecognitionImpl =
       window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -231,10 +257,19 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
           lastFinalIndexRef.current = i;
         }
       }
+
       if (finalChunk) {
         const deduped = stripOverlap(transcriptBufferRef.current, finalChunk);
-        if (deduped) {
+        // تجاهل النص لو أقصر من MIN_VALID_CHUNK_LENGTH (همسة/نويز بيرجع
+        // أحيانًا كـ isFinal بنص تافه) - مبيصفرش تايمر السكوت
+        if (deduped && deduped.trim().length >= MIN_VALID_CHUNK_LENGTH) {
           transcriptBufferRef.current += deduped + ' ';
+
+          // نص حقيقي وصل - صفّر تايمر السكوت وابدأه من جديد
+          clearSilenceTimer();
+          silenceTimerRef.current = setTimeout(() => {
+            sendFinalTranscript();
+          }, SILENCE_AUTOSEND_MS);
         }
       }
     };
@@ -247,6 +282,7 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
       }
       fatalError = true;
       isStoppingRef.current = true;
+      clearSilenceTimer();
       setErrorMsg('تعذر التعرف على الصوت');
       setStatus('error');
     };
@@ -261,7 +297,7 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
           } catch {
             sendFinalTranscript();
           }
-        }, 250);
+        }, 0);
         return;
       }
 
@@ -377,6 +413,7 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
 
     isStoppingRef.current = true;
     clearRestartTimeout();
+    clearSilenceTimer();
     recognitionRef.current?.stop();
     recognitionRef.current = null;
 
@@ -396,7 +433,12 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
    *    المساعد كان بيتكلم لسه، ده يعتبر مقاطعة (barge-in) - بنوقف صوته
    *    فورًا محليًا وبنبلغ السيرفر.
    *  - بيدوس تاني لما يخلص كلامه (mute): بيوقف SpeechRecognition، وبمجرد
-   *    ما يوصل النص النهائي بيتبعت للسيرفر كنص جاهز (STT خلص في المتصفح). */
+   *    ما يوصل النص النهائي بيتبعت للسيرفر كنص جاهز (STT خلص في المتصفح).
+   *
+   *  ده لسه شغال بالظبط زي ما هو - المستخدم يقدر يدوس "خلصت الكلام" في
+   *  أي وقت من غير ما يستنى تايمر السكوت. تايمر السكوت (auto-send) ده
+   *  طبقة إضافية بس فوق نفس المنطق، مش بديل ليه.
+   */
   const toggleMic = useCallback(() => {
     const goingToMuted = !isMicMuted;
     setIsMicMuted(goingToMuted);
@@ -405,6 +447,7 @@ export function useCall({ onTranscript, onAnswer }: UseCallOptions): UseCallRetu
       // خلص كلامه - أوقفي SpeechRecognition؛ onend هيبعت النص تلقائيًا
       isStoppingRef.current = true;
       clearRestartTimeout();
+      clearSilenceTimer();
       recognitionRef.current?.stop();
     } else {
       // بدأ يتكلم من جديد - وقفي أي صوت شغال محليًا فورًا وبلغي السيرفر
